@@ -22,18 +22,26 @@ from telegram.ext import (
     filters,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8957110767"))
+
 USDT_ADDRESS = os.getenv(
     "USDT_ADDRESS",
     "THSbZXqnnLUAzfgYkv9AavBD4YdHTTzNxz"
 )
+
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
 
-# 台湾旗帜图片：与 app_v5.py 放在同一目录
-VIP_FLAG_IMAGE = "https://raw.githubusercontent.com/lxf989/1/main/1E6D4C30-CAB6-448E-9D9A-2265307D5075.png"
+# VIP 图片：GitHub 原始图片地址
+VIP_FLAG_IMAGE = (
+    "https://raw.githubusercontent.com/lxf989/1/main/"
+    "1E6D4C30-CAB6-448E-9D9A-2265307D5075.png"
+)
 
 # 高级表情 ID
 VIP_EMOJI_ID = "5235630047959727475"
@@ -84,7 +92,7 @@ payment_waiting = set()
 
 
 # =========================
-# 高级表情发送工具
+# 高级表情工具
 # =========================
 
 def custom_entity(text, marker, emoji_id):
@@ -134,22 +142,18 @@ def custom_entities_all(text, marker, emoji_id):
 
 
 async def reply_custom(message, text, marker, emoji_id, **kwargs):
-    entities = custom_entity(text, marker, emoji_id)
-
     return await message.reply_text(
         text,
-        entities=entities,
+        entities=custom_entity(text, marker, emoji_id),
         **kwargs
     )
 
 
 async def send_custom(bot, chat_id, text, marker, emoji_id, **kwargs):
-    entities = custom_entities_all(text, marker, emoji_id)
-
     return await bot.send_message(
         chat_id=chat_id,
         text=text,
-        entities=entities,
+        entities=custom_entities_all(text, marker, emoji_id),
         **kwargs
     )
 
@@ -244,8 +248,37 @@ def get_user(user_id):
     return result
 
 
+def save_reply_message(admin_message_id, user_id):
+    con = db()
+    cur = con.cursor()
+
+    cur.execute("""
+    INSERT OR REPLACE INTO replies
+    (admin_message_id, user_id)
+    VALUES (?, ?)
+    """, (admin_message_id, user_id))
+
+    con.commit()
+    con.close()
+
+
+def get_reply_user(admin_message_id):
+    con = db()
+    cur = con.cursor()
+
+    cur.execute(
+        "SELECT user_id FROM replies WHERE admin_message_id=?",
+        (admin_message_id,)
+    )
+
+    result = cur.fetchone()
+    con.close()
+
+    return result[0] if result else None
+
+
 # =========================
-# 菜单和状态
+# 菜单
 # =========================
 
 def main_keyboard(user_id):
@@ -364,7 +397,7 @@ async def points(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# 积分兑换VIP：18积分兑换30天
+# 积分兑换VIP
 # =========================
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -422,7 +455,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        f"你的 Telegram 用户ID：\n"
+        "你的 Telegram 用户ID：\n"
         f"{user_id_line(update.effective_user.id)}"
     )
 
@@ -448,7 +481,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = f"@{user.username}" if user.username else "未设置"
 
     text = (
-        f"👤 个人资料\n\n"
+        "👤 个人资料\n\n"
         f"姓名：{user.first_name or '未设置'}\n"
         f"用户名：{username}\n"
         f"{user_id_line(user.id)}\n"
@@ -487,7 +520,7 @@ async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# ✈️ VIP功能
+# VIP功能图片
 # =========================
 
 async def vip_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -499,18 +532,19 @@ async def vip_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         VIP_FEATURE_EMOJI_ID
     )
 
-    if not os.path.isfile(VIP_FLAG_IMAGE):
-        await update.message.reply_text(
-            "VIP图片文件不存在，请检查 vip_flag.png 是否上传。"
-        )
-        return
-
-    with open(VIP_FLAG_IMAGE, "rb") as photo:
+    try:
         await context.bot.send_photo(
             chat_id=update.effective_chat.id,
-            photo=photo,
+            photo=VIP_FLAG_IMAGE,
             caption=caption,
             caption_entities=entities
+        )
+
+    except Exception:
+        logging.exception("VIP图片发送失败")
+
+        await update.effective_message.reply_text(
+            "VIP图片发送失败，请稍后再试。"
         )
 
 
@@ -564,7 +598,7 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"{VIP_MARK} 套餐：{plan} VIP\n"
             f"金额：{amount} USDT\n\n"
-            f"请使用 TRC20 网络转账至以下地址：\n"
+            "请使用 TRC20 网络转账至以下地址：\n"
             f"`{USDT_ADDRESS}`\n\n"
             "转账完成后，点击“我已支付”，提交交易凭证。"
         )
@@ -838,12 +872,10 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con.commit()
     con.close()
 
-    text = (
+    await update.message.reply_text(
         f"✅ 已为用户 {target_id} 开通 {days} 天 VIP。\n"
         f"到期时间：{expiry}"
     )
-
-    await update.message.reply_text(text)
 
     try:
         await send_custom(
@@ -920,6 +952,88 @@ async def change_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# 双向联系：发送用户消息
+# =========================
+
+async def forward_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    user = update.effective_user
+
+    username_text = (
+        f"@{user.username}"
+        if user.username
+        else "未设置"
+    )
+
+    header = (
+        f"用户名：{username_text}\n"
+        f"{USER_MARK} 用户：{user.id}\n"
+        f"用户名字：{user.first_name or '未设置'}\n\n"
+        "消息内容："
+    )
+
+    try:
+        # 普通文字：资料和消息真正合并成一条
+        if message.text:
+            combined_text = header + "\n" + message.text
+
+            sent = await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=combined_text,
+                entities=custom_entities_all(
+                    combined_text,
+                    USER_MARK,
+                    USER_EMOJI_ID
+                )
+            )
+
+        # 带 caption 的媒体：将资料放进 caption
+        elif message.caption:
+            combined_caption = header + "\n" + message.caption
+
+            sent = await context.bot.copy_message(
+                chat_id=ADMIN_ID,
+                from_chat_id=message.chat_id,
+                message_id=message.message_id,
+                caption=combined_caption,
+                caption_entities=(
+                    custom_entities_all(
+                        combined_caption,
+                        USER_MARK,
+                        USER_EMOJI_ID
+                    )
+                )
+            )
+
+        # 没有 caption 的媒体：Telegram 不支持给所有媒体类型添加说明
+        else:
+            await send_custom(
+                context.bot,
+                ADMIN_ID,
+                header,
+                USER_MARK,
+                USER_EMOJI_ID
+            )
+
+            sent = await context.bot.copy_message(
+                chat_id=ADMIN_ID,
+                from_chat_id=message.chat_id,
+                message_id=message.message_id
+            )
+
+        save_reply_message(sent.message_id, user.id)
+
+        await message.reply_text("✅ 已发送给管理员。")
+
+    except Exception:
+        logging.exception("双向联系转发失败")
+
+        await message.reply_text(
+            "发送失败，请稍后重试。"
+        )
+
+
+# =========================
 # 消息处理
 # =========================
 
@@ -937,20 +1051,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 管理员回复双向联系消息
     if user_id == ADMIN_ID and message.reply_to_message:
-        con = db()
-        cur = con.cursor()
-
-        cur.execute(
-            "SELECT user_id FROM replies WHERE admin_message_id=?",
-            (message.reply_to_message.message_id,)
+        target_id = get_reply_user(
+            message.reply_to_message.message_id
         )
 
-        result = cur.fetchone()
-        con.close()
-
-        if result:
-            target_id = result[0]
-
+        if target_id:
             try:
                 await context.bot.copy_message(
                     chat_id=target_id,
@@ -961,6 +1066,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("✅ 已回复用户。")
 
             except Exception as e:
+                logging.exception("管理员回复用户失败")
                 await message.reply_text(f"发送失败：{e}")
 
             return
@@ -1004,11 +1110,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         except Exception as e:
+            logging.exception("提交支付凭证失败")
             await message.reply_text(f"提交失败，请稍后重试：{e}")
 
         return
 
-    # 用户退出双向联系
+    # 退出双向联系
     if text == "❌ 退出联系":
         clear_mode(user_id)
 
@@ -1019,7 +1126,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # 用户退出菜单
+    # 退出菜单
     if text == "❌ 退出菜单":
         clear_mode(user_id)
         context.user_data.clear()
@@ -1031,7 +1138,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # 底部菜单功能
     menu_items = {
         "💬 双向联系",
         "👤 我的资料",
@@ -1039,6 +1145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "VIP会员",
         "💎 VIP会员",
         "✈️ VIP功能",
+        "✈️ VIP功能 ✅",
         "🖼 NFT查询",
         "📱 +888号码查询",
         "👤 收藏用户名查询",
@@ -1051,7 +1158,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
 
         if text == "💬 双向联系":
-            user_modes[user_id] = text
+            user_modes[user_id] = "💬 双向联系"
             contact_waiting.add(user_id)
 
             await reply_custom(
@@ -1060,7 +1167,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "你发送的消息会转发给管理员，管理员回复后会转发给你。\n"
                 "点击“❌ 退出联系”即可结束。",
                 CONTACT_MARK,
-                CONTACT_EMOJI_ID
+                CONTACT_EMOJI_ID,
+                reply_markup=main_keyboard(user_id)
             )
 
             return
@@ -1083,7 +1191,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await vip(update, context)
             return
 
-        if text == "✈️ VIP功能":
+        if text in ("✈️ VIP功能", "✈️ VIP功能 ✅"):
             await vip_feature(update, context)
             return
 
@@ -1137,7 +1245,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target = origin.sender_user
 
             result_text = (
-                f"✅ 查询成功\n"
+                "✅ 查询成功\n"
                 f"姓名：{target.first_name or '未设置'}\n"
                 f"用户名：@{target.username if target.username else '未设置'}\n"
                 f"{user_id_line(target.id)}"
@@ -1159,57 +1267,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_mode(user_id)
         return
 
-    # 双向联系：先发身份资料，再复制原始消息
+    # 双向联系
     if user_id != ADMIN_ID and user_id in contact_waiting:
-        try:
-            username_text = (
-                f"@{user.username}"
-                if user.username
-                else "未设置"
-            )
-
-            header = (
-                f"用户名：{username_text}\n"
-                f"{USER_MARK} 用户：{user.id}\n"
-                f"用户名字：{user.first_name or '未设置'}\n"
-                "消息内容："
-            )
-
-            await send_custom(
-                context.bot,
-                ADMIN_ID,
-                header,
-                USER_MARK,
-                USER_EMOJI_ID
-            )
-
-            sent = await context.bot.copy_message(
-                chat_id=ADMIN_ID,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id
-            )
-
-            con = db()
-            cur = con.cursor()
-
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO replies
-                (admin_message_id, user_id)
-                VALUES (?, ?)
-                """,
-                (sent.message_id, user_id)
-            )
-
-            con.commit()
-            con.close()
-
-            await message.reply_text("✅ 已发送给管理员。")
-
-        except Exception as e:
-            logging.exception("双向联系转发失败")
-            await message.reply_text(f"发送失败：{e}")
-
+        await forward_contact_message(update, context)
         return
 
     # 其他消息
@@ -1307,10 +1367,21 @@ def main():
 
     application.add_handler(CallbackQueryHandler(payment_callback))
 
-    application.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND,
-        handle_message
-    ))
+    # VIP按钮单独处理，必须放在通用消息处理器前面
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"^✈️ VIP功能(?: ✅)?$"),
+            vip_feature
+        )
+    )
+
+    # 其他消息统一处理
+    application.add_handler(
+        MessageHandler(
+            filters.ALL & ~filters.COMMAND,
+            handle_message
+        )
+    )
 
     print("机器人启动成功！")
     application.run_polling()
