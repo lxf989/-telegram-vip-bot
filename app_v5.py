@@ -521,6 +521,35 @@ async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def vip_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # 查询用户VIP资料
+    row = get_user(user_id)
+
+    # 未开通VIP
+    if not row or not row[5]:
+        await update.effective_message.reply_text(
+            "❌ 此功能仅限 VIP 会员使用，请先开通 VIP。"
+        )
+        return
+
+    # 检查VIP是否到期
+    try:
+        vip_until = datetime.fromisoformat(row[5])
+
+        if vip_until <= datetime.now():
+            await update.effective_message.reply_text(
+                "❌ 你的 VIP 已到期，请续费后使用此功能。"
+            )
+            return
+
+    except (ValueError, TypeError):
+        await update.effective_message.reply_text(
+            "❌ VIP信息异常，请联系管理员处理。"
+        )
+        return
+
+    # VIP有效，发送图片
     caption = f"{VIP_FEATURE_MARK} 你好，欢迎开通VIP，谢谢支持！"
 
     entities = custom_entity(
