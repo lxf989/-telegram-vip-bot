@@ -1307,10 +1307,18 @@ def main():
 
     application.add_handler(CallbackQueryHandler(payment_callback))
 
-    application.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND,
-        handle_message
-    ))
+# 单独处理 VIP功能按钮
+    application.add_handler(
+    MessageHandler(
+        filters.TEXT & filters.Regex("VIP功能"),
+        vip_feature
+    )
+)
+
+application.add_handler(MessageHandler(
+    filters.ALL & ~filters.COMMAND,
+    handle_message
+))
 
     print("机器人启动成功！")
     application.run_polling()
