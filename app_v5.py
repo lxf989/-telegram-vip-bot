@@ -84,8 +84,8 @@ NICKNAME_EMOJI_ID = "6235662197276544197"
 PROFILE_ID_EMOJI_ID = USER_EMOJI_ID
 USDT_EMOJI_ID = "6213220344614882714"
 
-VIP_MARK = "⭐"
-USER_MARK = "⭐"
+VIP_MARK = "💎"
+USDT_MARK = "💰"
 CONTACT_MARK = "⭐"
 ADMIN_MARK = "⭐"
 POINTS_MARK = "⭐"
@@ -94,7 +94,7 @@ VIP_FEATURE_MARK = "⭐"
 
 NICKNAME_MARK = "⭐"
 PROFILE_ID_MARK = "⭐"
-USDT_MARK = "⭐"
+USDT_MARK = "💰"
 
 # ==================================================
 # 菜单
