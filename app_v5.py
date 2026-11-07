@@ -3563,36 +3563,25 @@ async def handle_message(update, context):
         context.user_data["withdraw_state"] = "final_confirm"
         return
 
-    # 双向联系
-    # 双向联系开启按钮
+    # 双向联系开启
     if text == "💬 双向联系":
-    contact_waiting.add(user_id)
-
-    await update.message.reply_text(
-        "6131651403766045300 双向联系已开启。\n"
-        "你发送的消息会转发给管理员，管理员回复后会转发给你。\n"
-        "点击「❌ 退出联系」即可结束。"
-    )
-    return
+        contact_waiting.add(user_id)
+        await message.reply_text(
+            "💬 双向联系已开启。\n"
+            "你可以连续发送文字、图片、视频和文件。\n"
+            "管理员回复后，消息会转发给你。\n"
+            "点击「❌ 退出联系」结束。"
+        )
+        return
 
     # 退出双向联系
     if text == "❌ 退出联系":
-    contact_waiting.discard(user_id)
-    await update.message.reply_text("❌ 双向联系已关闭。")
-    return
-
-    # 已开启联系：允许连续发送
-    if user_id in contact_waiting:
-    await forward_contact_message(update, context)
-    return
-
-    if user_id in contact_waiting:
-        if text == "/cancel":
-            contact_waiting.discard(user_id)
-            await message.reply_text("已取消联系。")
-            return
-
         contact_waiting.discard(user_id)
+        await message.reply_text("❌ 双向联系已关闭。")
+        return
+
+    # 联系期间允许连续发送，不自动退出
+    if user_id in contact_waiting:
         await forward_contact_message(update, context)
         return
 
