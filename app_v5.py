@@ -607,51 +607,170 @@ async def vip_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================================================
-# 支付流程
+# VIP 支付流程（同一条消息编辑）
 # ==================================================
+
+def vip_plan_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("7天 VIP · 1 USDT", callback_data="plan_7天")],
+        [InlineKeyboardButton("30天 VIP · 2 USDT", callback_data="plan_30天")],
+        [InlineKeyboardButton("90天 VIP · 5 USDT", callback_data="plan_90天")],
+        [InlineKeyboardButton("365天 VIP · 10 USDT", callback_data="plan_365天")],
+    ])
+
+
+def vip_method_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("TRC20（USDT）", callback_data="pay_trc20")],
+        [InlineKeyboardButton("OKPay", callback_data="pay_okpay")],
+        [InlineKeyboardButton("🔙 返回上一级", callback_data="pay_back_plan")],
+    ])
+
+
+def vip_order_keyboard(plan, method):
+    keyboard = []
+
+    if method == "OKPay":
+        keyboard.append([
+            InlineKeyboardButton(
+                "前往 OKPay 支付",
+                url=OKPAY_LINKS[plan]
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("📋 我已支付", callback_data="paid")
+    ])
+
+    keyboard.append([
+        InlineKeyboardButton("🔙 返回上一级", callback_data="pay_back_method")
+    ])
+
+    keyboard.append([
+        InlineKeyboardButton("❌ 取消支付", callback_data="pay_cancel")
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def clear_payment_state(user_id, context):
+    payment_waiting.discard(user_id)
+
+    for key in (
+        "selected_plan",
+        "payment_method",
+        "payment_order_active",
+        "payment_menu_message_id",
+        "payment_menu_chat_id",
+    ):
+        context.user_data.pop(key, None)
+
 
 async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-
-    await query.answer()
-
     user_id = query.from_user.id
     data = query.data
 
+    await query.answer()
+
+    # 选择套餐：编辑原消息显示支付方式
     if data.startswith("plan_"):
         plan = data.replace("plan_", "")
 
         if plan not in PLANS:
             return
 
+        clear_payment_state(user_id, context)
         context.user_data["selected_plan"] = plan
 
-        keyboard = [
-            [InlineKeyboardButton("TRC20（USDT）", callback_data="pay_trc20")],
-            [InlineKeyboardButton("OKPay", callback_data="pay_okpay")],
-        ]
-
-        await query.message.reply_text(
+        await query.edit_message_text(
             f"已选择 {plan} VIP。\n请选择支付方式：",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=vip_method_keyboard()
         )
+        return
 
-    elif data == "pay_trc20":
+    # 返回套餐页面
+    if data == "pay_back_plan":
+        clear_payment_state(user_id, context)
+
+        text = f"{VIP_MARK} 请选择 VIP 套餐："
+
+        await query.edit_message_text(
+            text,
+            entities=custom_entity(
+                text,
+                VIP_MARK,
+                VIP_EMOJI_ID
+            ),
+            reply_markup=vip_plan_keyboard()
+        )
+        return
+
+    # 返回支付方式页面
+    if data == "pay_back_method":
+        payment_waiting.discard(user_id)
+
+        context.user_data.pop("payment_method", None)
+        context.user_data.pop("payment_order_active", None)
+        context.user_data.pop("payment_menu_message_id", None)
+        context.user_data.pop("payment_menu_chat_id", None)
+
         plan = context.user_data.get("selected_plan")
 
         if not plan:
-            await query.message.reply_text(
-                "请重新进入 VIP 会员页面选择套餐。"
+            text = f"{VIP_MARK} 请选择 VIP 套餐："
+
+            await query.edit_message_text(
+                text,
+                entities=custom_entity(
+                    text,
+                    VIP_MARK,
+                    VIP_EMOJI_ID
+                ),
+                reply_markup=vip_plan_keyboard()
+            )
+            return
+
+        await query.edit_message_text(
+            f"已选择 {plan} VIP。\n请选择支付方式：",
+            reply_markup=vip_method_keyboard()
+        )
+        return
+
+    # 取消支付：清除状态并返回套餐页面
+    if data == "pay_cancel":
+        clear_payment_state(user_id, context)
+
+        text = f"{VIP_MARK} 已取消本次支付。\n\n请选择 VIP 套餐："
+
+        await query.edit_message_text(
+            text,
+            entities=custom_entity(
+                text,
+                VIP_MARK,
+                VIP_EMOJI_ID
+            ),
+            reply_markup=vip_plan_keyboard()
+        )
+        return
+
+    # 选择 TRC20：创建本次支付订单
+    if data == "pay_trc20":
+        plan = context.user_data.get("selected_plan")
+
+        if not plan or plan not in PLANS:
+            await query.edit_message_text(
+                "套餐信息已失效，请重新选择 VIP 套餐。",
+                reply_markup=vip_plan_keyboard()
             )
             return
 
         amount, days = PLANS[plan]
 
         context.user_data["payment_method"] = "TRC20"
-
-        keyboard = [
-            [InlineKeyboardButton("📋 我已支付", callback_data="paid")]
-        ]
+        context.user_data["payment_order_active"] = True
+        context.user_data["payment_menu_message_id"] = query.message.message_id
+        context.user_data["payment_menu_chat_id"] = query.message.chat_id
 
         text = (
             f"{VIP_MARK} 套餐：{plan} VIP\n"
@@ -661,33 +780,32 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "转账完成后，点击“我已支付”，提交交易凭证。"
         )
 
-        await send_custom(
-            context.bot,
-            query.message.chat_id,
+        await query.edit_message_text(
             text,
-            VIP_MARK,
-            VIP_EMOJI_ID,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            entities=custom_entities_all(
+                text,
+                VIP_MARK,
+                VIP_EMOJI_ID
+            ),
+            reply_markup=vip_order_keyboard(plan, "TRC20")
         )
+        return
 
-    elif data == "pay_okpay":
+    # 选择 OKPay：创建本次支付订单
+    if data == "pay_okpay":
         plan = context.user_data.get("selected_plan")
 
-        if not plan:
-            await query.message.reply_text(
-                "请重新进入 VIP 会员页面选择套餐。"
+        if not plan or plan not in PLANS:
+            await query.edit_message_text(
+                "套餐信息已失效，请重新选择 VIP 套餐。",
+                reply_markup=vip_plan_keyboard()
             )
             return
 
         context.user_data["payment_method"] = "OKPay"
-
-        keyboard = [
-            [InlineKeyboardButton(
-                "前往 OKPay 支付",
-                url=OKPAY_LINKS[plan]
-            )],
-            [InlineKeyboardButton("📋 我已支付", callback_data="paid")]
-        ]
+        context.user_data["payment_order_active"] = True
+        context.user_data["payment_menu_message_id"] = query.message.message_id
+        context.user_data["payment_menu_chat_id"] = query.message.chat_id
 
         text = (
             f"{VIP_MARK} 套餐：{plan} VIP\n"
@@ -695,28 +813,43 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "点击下方按钮前往 OKPay。支付完成后，请回来提交凭证。"
         )
 
-        await send_custom(
-            context.bot,
-            query.message.chat_id,
+        await query.edit_message_text(
             text,
-            VIP_MARK,
-            VIP_EMOJI_ID,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            entities=custom_entities_all(
+                text,
+                VIP_MARK,
+                VIP_EMOJI_ID
+            ),
+            reply_markup=vip_order_keyboard(plan, "OKPay")
         )
+        return
 
-    elif data == "paid":
+    # 我已支付：编辑原消息提示提交凭证
+    if data == "paid":
         plan = context.user_data.get("selected_plan")
 
-        if not plan:
-            await query.message.reply_text("请先选择 VIP 套餐。")
+        if not plan or not context.user_data.get("payment_order_active"):
+            await query.answer(
+                "支付订单不存在，请重新选择支付方式。",
+                show_alert=True
+            )
             return
 
         payment_waiting.add(user_id)
 
-        await query.message.reply_text(
+        await query.edit_message_text(
             f"请发送你的 {plan} VIP 支付凭证或交易 TXID。\n"
-            "管理员核实到账后会为你开通 VIP。"
+            "管理员核实到账后会为你开通 VIP。",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "❌ 取消支付",
+                        callback_data="pay_cancel"
+                    )
+                ]
+            ])
         )
+        return
 
 
 # ==================================================
