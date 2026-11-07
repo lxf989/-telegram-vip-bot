@@ -38,7 +38,7 @@ USDT_ADDRESS = os.getenv(
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
 
 # VIP 图片：GitHub 原始图片地址
-VIP_FLAG_IMAGE = "https://raw.githubusercontent.com/lxf989/1/main/vip_flag.png"
+VIP_FLAG_IMAGE = "https://raw.githubusercontent.com/lxf989/-telegram-vip-bot/main/1E6D4C30-CAB6-448E-9D9A-2265307D5075.png?utm_source=chatgpt.com"
 
 # 高级表情 ID
 VIP_EMOJI_ID = "5235630047959727475"
