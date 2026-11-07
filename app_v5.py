@@ -1,7 +1,9 @@
 import os
+import re
 import sqlite3
 import logging
 import asyncio
+from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timedelta
 
 from telegram import (
@@ -13,7 +15,6 @@ from telegram import (
     BotCommandScopeChat,
     MessageEntity,
 )
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -46,9 +47,9 @@ VIP_FLAG_IMAGE = (
     "1E6D4C30-CAB6-448E-9D9A-2265307D5075.png"
 )
 
-# =========================
-# 高级表情 ID
-# =========================
+# ==================================================
+# 高级表情
+# ==================================================
 
 VIP_EMOJI_ID = "5235630047959727475"
 USER_EMOJI_ID = "6210879471474447673"
@@ -58,6 +59,10 @@ POINTS_EMOJI_ID = "5408869739982246969"
 CHECKIN_EMOJI_ID = "5449800250032143374"
 VIP_FEATURE_EMOJI_ID = "5255907722435501318"
 
+NICKNAME_EMOJI_ID = "6235662197276544197"
+PROFILE_ID_EMOJI_ID = "6235699516247379290"
+USDT_EMOJI_ID = "6213220344614882714"
+
 VIP_MARK = "⭐"
 USER_MARK = "⭐"
 CONTACT_MARK = "⭐"
@@ -66,23 +71,31 @@ POINTS_MARK = "⭐"
 CHECKIN_MARK = "⭐"
 VIP_FEATURE_MARK = "⭐"
 
-# =========================
-# 底部菜单（保留原菜单）
-# =========================
+NICKNAME_MARK = "⭐"
+PROFILE_ID_MARK = "⭐"
+USDT_MARK = "⭐"
+
+INVITE_REWARD = 1000       # 10 USDT，单位为分
+WITHDRAW_FEE = 100         # 1 USDT
+MIN_WITHDRAW = 1000        # 10 USDT
+
+TRON_ADDRESS_PATTERN = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+
+# ==================================================
+# 菜单
+# ==================================================
 
 MENU = [
     ["💬 双向联系", "👤 我的资料"],
     ["🆔 查询用户ID", "💎 VIP会员"],
     ["✈️ VIP功能"],
+    ["💰 我的余额", "🔗 邀请好友"],
+    ["💸 申请提现"],
     ["🖼 NFT查询", "📱 +888号码查询"],
     ["👤 收藏用户名查询"],
     ["🎁 每日签到", "👨‍💻 联系管理员"],
     ["❌ 退出菜单"],
 ]
-
-# =========================
-# VIP 套餐（保留原价格）
-# =========================
 
 PLANS = {
     "7天": (1, 7),
@@ -98,18 +111,15 @@ OKPAY_LINKS = {
     "365天": "https://t.me/OkayPayBot?start=transfer_by_text--ODk1NzExMDc2NyAxMC4wMA==",
 }
 
-# =========================
+# ==================================================
 # 状态变量
-# =========================
+# ==================================================
 
 user_modes = {}
 contact_waiting = set()
 payment_waiting = set()
-
-# 管理员主动发送消息
 admin_message_targets = {}
 
-# 管理员用户分页
 USER_PAGE_SIZE = 20
 
 
@@ -184,12 +194,43 @@ def user_id_line(user_id):
     return f"{USER_MARK} 用户：{user_id}"
 
 
+def usdt_entities(text):
+    return custom_entities_all(text, USDT_MARK, USDT_EMOJI_ID)
+
+
+def format_usdt(amount):
+    return f"{Decimal(amount) / Decimal(100):.2f}"
+
+
+def parse_usdt(value):
+    try:
+        number = Decimal(value.strip())
+
+        if not number.is_finite() or number <= 0:
+            return None
+
+        if number.as_tuple().exponent < -2:
+            return None
+
+        cents = int(number * 100)
+
+        if Decimal(cents) != number * 100:
+            return None
+
+        return cents
+
+    except (InvalidOperation, ValueError, AttributeError):
+        return None
+
+
 # ==================================================
 # 数据库
 # ==================================================
 
 def db():
-    return sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.execute("PRAGMA busy_timeout=30000")
+    return con
 
 
 def init_db():
@@ -222,6 +263,54 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS balances (
+        user_id INTEGER PRIMARY KEY,
+        balance INTEGER NOT NULL DEFAULT 0
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS referrals (
+        invited_id INTEGER PRIMARY KEY,
+        inviter_id INTEGER NOT NULL,
+        reward INTEGER NOT NULL DEFAULT 1000,
+        created_at TEXT NOT NULL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS withdrawals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        address TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        fee INTEGER NOT NULL,
+        payout INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        reason TEXT,
+        admin_id INTEGER,
+        created_at TEXT NOT NULL,
+        reviewed_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_withdrawals_user
+    ON withdrawals(user_id)
+    """)
+
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_referrals_inviter
+    ON referrals(inviter_id)
+    """)
+
+    # 为原有用户建立余额记录，不修改原有积分和VIP
+    cur.execute("""
+    INSERT OR IGNORE INTO balances(user_id, balance)
+    SELECT user_id, 0 FROM users
+    """)
+
     con.commit()
     con.close()
 
@@ -250,6 +339,11 @@ def register_user(user):
         user.first_name or "",
         user.id
     ))
+
+    cur.execute("""
+    INSERT OR IGNORE INTO balances(user_id, balance)
+    VALUES (?, 0)
+    """, (user.id,))
 
     con.commit()
     con.close()
@@ -300,6 +394,722 @@ def get_reply_user(admin_message_id):
 
 
 # ==================================================
+# 邀请奖励
+# ==================================================
+
+def bind_inviter(invited_id, inviter_id):
+    if invited_id == inviter_id:
+        return False
+
+    con = db()
+
+    try:
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        # 被邀请用户必须是新用户
+        cur.execute(
+            "SELECT first_seen FROM users WHERE user_id=?",
+            (invited_id,)
+        )
+
+        if not cur.fetchone():
+            con.rollback()
+            return False
+
+        cur.execute(
+            "SELECT 1 FROM referrals WHERE invited_id=?",
+            (invited_id,)
+        )
+
+        if cur.fetchone():
+            con.rollback()
+            return False
+
+        cur.execute(
+            "SELECT 1 FROM users WHERE user_id=?",
+            (inviter_id,)
+        )
+
+        if not cur.fetchone():
+            con.rollback()
+            return False
+
+        cur.execute("""
+        INSERT INTO referrals
+        (invited_id, inviter_id, reward, created_at)
+        VALUES (?, ?, ?, ?)
+        """, (
+            invited_id,
+            inviter_id,
+            INVITE_REWARD,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+
+        cur.execute("""
+        INSERT OR IGNORE INTO balances(user_id, balance)
+        VALUES (?, 0)
+        """, (inviter_id,))
+
+        cur.execute("""
+        UPDATE balances
+        SET balance=balance+?
+        WHERE user_id=?
+        """, (INVITE_REWARD, inviter_id))
+
+        con.commit()
+        return True
+
+    except sqlite3.IntegrityError:
+        con.rollback()
+        return False
+
+    except Exception:
+        con.rollback()
+        logger.exception("邀请奖励发放失败")
+        return False
+
+    finally:
+        con.close()
+
+
+def get_balance(user_id):
+    con = db()
+    cur = con.cursor()
+
+    cur.execute(
+        "SELECT balance FROM balances WHERE user_id=?",
+        (user_id,)
+    )
+
+    row = cur.fetchone()
+    con.close()
+
+    return row[0] if row else 0
+
+
+def get_invite_count(user_id):
+    con = db()
+    cur = con.cursor()
+
+    cur.execute(
+        "SELECT COUNT(*) FROM referrals WHERE inviter_id=?",
+        (user_id,)
+    )
+
+    count = cur.fetchone()[0]
+    con.close()
+
+    return count
+
+
+# ==================================================
+# 余额查看
+# ==================================================
+
+async def show_balance(update, context):
+    user = update.effective_user
+    register_user(user)
+
+    balance = get_balance(user.id)
+    invited = get_invite_count(user.id)
+
+    text = (
+        f"{NICKNAME_MARK} 昵称：{user.first_name or '未设置'}\n"
+        f"{PROFILE_ID_MARK} ID：{user.id}\n"
+        f"{USDT_MARK} USDT余额：{format_usdt(balance)} USDT\n\n"
+        f"成功邀请人数：{invited}"
+    )
+
+    entities = (
+        custom_entity(text, NICKNAME_MARK, NICKNAME_EMOJI_ID)
+        + custom_entity(text, PROFILE_ID_MARK, PROFILE_ID_EMOJI_ID)
+        + custom_entity(text, USDT_MARK, USDT_EMOJI_ID)
+    )
+
+    await update.effective_message.reply_text(
+        text,
+        entities=entities
+    )
+
+
+# ==================================================
+# 邀请好友
+# ==================================================
+
+async def show_invite(update, context):
+    user = update.effective_user
+    bot = await context.bot.get_me()
+
+    invite_link = f"https://t.me/{bot.username}?start=ref_{user.id}"
+
+    invited = get_invite_count(user.id)
+
+    text = (
+        "🔗 专属邀请链接\n\n"
+        f"{invite_link}\n\n"
+        "每成功邀请一位新用户，可获得 10 USDT。\n"
+        f"当前成功邀请人数：{invited}\n\n"
+        "奖励仅发放一次，不可重复领取。"
+    )
+
+    await update.effective_message.reply_text(text)
+
+
+# ==================================================
+# 提现流程
+# ==================================================
+
+def withdraw_cancel_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "❌ 取消提现",
+                callback_data="withdraw_cancel"
+            )
+        ]
+    ])
+
+
+async def begin_withdraw(update, context):
+    user_id = update.effective_user.id
+
+    register_user(update.effective_user)
+
+    balance = get_balance(user_id)
+
+    if balance < MIN_WITHDRAW:
+        text = (
+            f"{USDT_MARK} 当前余额：{format_usdt(balance)} USDT\n"
+            "最低提现金额为 10 USDT。"
+        )
+
+        await update.effective_message.reply_text(
+            text,
+            entities=usdt_entities(text)
+        )
+        return
+
+    context.user_data["withdraw_state"] = "address"
+
+    await update.effective_message.reply_text(
+        "💸 请发送你的 TRC20 USDT 收款地址。\n\n"
+        "请确认使用 TRON/TRC20 网络，地址通常以 T 开头。\n"
+        "发送后机器人会将地址回显给你核对。"
+    )
+
+
+async def withdraw_callback(update, context):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data
+
+    await query.answer()
+
+    if data == "withdraw_cancel":
+        context.user_data.pop("withdraw_state", None)
+        context.user_data.pop("withdraw_address", None)
+
+        await query.edit_message_text("已取消本次提现申请。")
+        return
+
+    if data.startswith("withdraw_approve_"):
+        if user_id != ADMIN_ID:
+            await query.answer("你没有权限操作。", show_alert=True)
+            return
+
+        try:
+            withdrawal_id = int(data.rsplit("_", 1)[1])
+        except ValueError:
+            return
+
+        con = db()
+
+        try:
+            cur = con.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+
+            cur.execute("""
+            SELECT user_id, amount, fee, payout, status
+            FROM withdrawals WHERE id=?
+            """, (withdrawal_id,))
+
+            row = cur.fetchone()
+
+            if not row:
+                con.rollback()
+                await query.answer("提现申请不存在。", show_alert=True)
+                return
+
+            target_id, amount, fee, payout, status = row
+
+            if status != "pending":
+                con.rollback()
+                await query.answer("该申请已经处理过。", show_alert=True)
+                return
+
+            cur.execute("""
+            UPDATE withdrawals
+            SET status='approved',
+                admin_id=?,
+                reviewed_at=?
+            WHERE id=? AND status='pending'
+            """, (
+                ADMIN_ID,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                withdrawal_id
+            ))
+
+            if cur.rowcount != 1:
+                con.rollback()
+                await query.answer("申请状态已改变。", show_alert=True)
+                return
+
+            con.commit()
+
+        except Exception:
+            con.rollback()
+            logger.exception("提现审核通过失败")
+            await query.answer("处理失败，请重试。", show_alert=True)
+            return
+
+        finally:
+            con.close()
+
+        await query.edit_message_text(
+            query.message.text + "\n\n✅ 审核已通过，等待管理员手动转账。",
+            reply_markup=None
+        )
+
+        text = (
+            "✅ 你的提现申请已经审核通过。\n"
+            f"{USDT_MARK} 申请金额：{format_usdt(amount)} USDT\n"
+            f"{USDT_MARK} 手续费：{format_usdt(fee)} USDT\n"
+            f"{USDT_MARK} 实际到账：{format_usdt(payout)} USDT\n\n"
+            "请等待管理员完成链上转账。"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=text,
+                entities=usdt_entities(text)
+            )
+        except Exception:
+            logger.exception("提现通过通知用户失败")
+
+        return
+
+    if data.startswith("withdraw_reject_"):
+        if user_id != ADMIN_ID:
+            await query.answer("你没有权限操作。", show_alert=True)
+            return
+
+        try:
+            withdrawal_id = int(data.rsplit("_", 1)[1])
+        except ValueError:
+            return
+
+        con = db()
+        cur = con.cursor()
+
+        cur.execute(
+            "SELECT status FROM withdrawals WHERE id=?",
+            (withdrawal_id,)
+        )
+
+        row = cur.fetchone()
+        con.close()
+
+        if not row or row[0] != "pending":
+            await query.answer("该申请不存在或已处理。", show_alert=True)
+            return
+
+        context.user_data["reject_withdraw_id"] = withdrawal_id
+
+        await query.edit_message_text(
+            query.message.text
+            + "\n\n请直接发送拒绝理由。"
+            "\n发送 /cancelmsg 可取消拒绝操作。"
+        )
+
+        await query.answer("请发送拒绝理由。")
+        return
+
+
+async def finish_withdraw_reject(update, context):
+    withdrawal_id = context.user_data.get("reject_withdraw_id")
+
+    if not withdrawal_id:
+        return False
+
+    if update.effective_user.id != ADMIN_ID:
+        return False
+
+    reason = (update.effective_message.text or "").strip()
+
+    if not reason:
+        await update.effective_message.reply_text("拒绝理由不能为空。")
+        return True
+
+    con = db()
+
+    try:
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        cur.execute("""
+        SELECT user_id, amount, status
+        FROM withdrawals
+        WHERE id=?
+        """, (withdrawal_id,))
+
+        row = cur.fetchone()
+
+        if not row:
+            con.rollback()
+            await update.effective_message.reply_text("提现申请不存在。")
+            context.user_data.pop("reject_withdraw_id", None)
+            return True
+
+        target_id, amount, status = row
+
+        if status != "pending":
+            con.rollback()
+            await update.effective_message.reply_text("该申请已经处理。")
+            context.user_data.pop("reject_withdraw_id", None)
+            return True
+
+        cur.execute("""
+        UPDATE withdrawals
+        SET status='rejected',
+            reason=?,
+            admin_id=?,
+            reviewed_at=?
+        WHERE id=? AND status='pending'
+        """, (
+            reason,
+            ADMIN_ID,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            withdrawal_id
+        ))
+
+        if cur.rowcount != 1:
+            con.rollback()
+            await update.effective_message.reply_text("处理失败，申请状态已改变。")
+            context.user_data.pop("reject_withdraw_id", None)
+            return True
+
+        # 退回原先冻结的申请金额
+        cur.execute("""
+        UPDATE balances
+        SET balance=balance+?
+        WHERE user_id=?
+        """, (amount, target_id))
+
+        con.commit()
+
+    except Exception:
+        con.rollback()
+        logger.exception("提现拒绝退款失败")
+        await update.effective_message.reply_text("退款处理失败，请检查数据库。")
+        return True
+
+    finally:
+        con.close()
+
+    context.user_data.pop("reject_withdraw_id", None)
+
+    await update.effective_message.reply_text(
+        f"已拒绝提现申请 #{withdrawal_id}，并退回 {format_usdt(amount)} USDT。"
+    )
+
+    text = (
+        "❌ 你的提现申请未通过。\n"
+        f"拒绝理由：{reason}\n\n"
+        f"{USDT_MARK} 已退回余额：{format_usdt(amount)} USDT"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=text,
+            entities=usdt_entities(text)
+        )
+    except Exception:
+        logger.exception("提现拒绝通知用户失败")
+
+    return True
+
+
+async def create_withdrawal(update, context):
+    user = update.effective_user
+    user_id = user.id
+
+    address = context.user_data.get("withdraw_address")
+
+    if not address:
+        await update.effective_message.reply_text("提现地址已失效，请重新申请。")
+        context.user_data.pop("withdraw_state", None)
+        return
+
+    amount = parse_usdt(update.effective_message.text or "")
+
+    if amount is None:
+        await update.effective_message.reply_text(
+            "金额格式不正确，请输入有效的 USDT 金额，例如：10 或 20.50。"
+        )
+        return
+
+    if amount < MIN_WITHDRAW:
+        await update.effective_message.reply_text(
+            "最低提现金额为 10 USDT，请重新输入。"
+        )
+        return
+
+    if amount <= WITHDRAW_FEE:
+        await update.effective_message.reply_text(
+            "申请金额必须大于手续费。"
+        )
+        return
+
+    payout = amount - WITHDRAW_FEE
+
+    con = db()
+
+    try:
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        cur.execute("""
+        UPDATE balances
+        SET balance=balance-?
+        WHERE user_id=? AND balance>=?
+        """, (amount, user_id, amount))
+
+        if cur.rowcount != 1:
+            con.rollback()
+
+            current = get_balance(user_id)
+
+            await update.effective_message.reply_text(
+                f"余额不足，目前余额：{format_usdt(current)} USDT。"
+            )
+            return
+
+        cur.execute("""
+        INSERT INTO withdrawals
+        (user_id, address, amount, fee, payout, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        """, (
+            user_id,
+            address,
+            amount,
+            WITHDRAW_FEE,
+            payout,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+
+        withdrawal_id = cur.lastrowid
+
+        con.commit()
+
+    except Exception:
+        con.rollback()
+        logger.exception("创建提现申请失败")
+        await update.effective_message.reply_text("提现申请失败，请稍后重试。")
+        return
+
+    finally:
+        con.close()
+
+    context.user_data.pop("withdraw_state", None)
+    context.user_data.pop("withdraw_address", None)
+
+    text = (
+        "💸 新的 USDT 提现申请\n\n"
+        f"申请编号：#{withdrawal_id}\n"
+        f"用户：{user.first_name or '未设置'}\n"
+        f"用户名：@{user.username if user.username else '未设置'}\n"
+        f"用户ID：{user_id}\n\n"
+        f"TRC20地址：{address}\n\n"
+        f"{USDT_MARK} 申请金额：{format_usdt(amount)} USDT\n"
+        f"{USDT_MARK} 手续费：{format_usdt(WITHDRAW_FEE)} USDT\n"
+        f"{USDT_MARK} 实际到账：{format_usdt(payout)} USDT\n\n"
+        f"申请时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ 同意提现",
+                callback_data=f"withdraw_approve_{withdrawal_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ 拒绝提现",
+                callback_data=f"withdraw_reject_{withdrawal_id}"
+            )
+        ]
+    ])
+
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=text,
+            entities=usdt_entities(text),
+            reply_markup=keyboard
+        )
+    except Exception:
+        logger.exception("发送提现申请给管理员失败")
+
+        # 管理员通知发送失败时撤销申请并退款
+        con = db()
+
+        try:
+            cur = con.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+
+            cur.execute("""
+            UPDATE withdrawals
+            SET status='notification_failed'
+            WHERE id=? AND status='pending'
+            """, (withdrawal_id,))
+
+            if cur.rowcount == 1:
+                cur.execute("""
+                UPDATE balances
+                SET balance=balance+?
+                WHERE user_id=?
+                """, (amount, user_id))
+
+            con.commit()
+
+        except Exception:
+            con.rollback()
+            logger.exception("提现通知失败后的退款处理失败")
+
+        finally:
+            con.close()
+
+        await update.effective_message.reply_text(
+            "提现通知管理员失败，申请已撤销，请稍后重新申请。"
+        )
+        return
+
+    text = (
+        "✅ 提现申请已提交，等待管理员审核。\n\n"
+        f"{USDT_MARK} 申请金额：{format_usdt(amount)} USDT\n"
+        f"{USDT_MARK} 手续费：{format_usdt(WITHDRAW_FEE)} USDT\n"
+        f"{USDT_MARK} 实际到账：{format_usdt(payout)} USDT\n\n"
+        "审核期间申请金额已暂时冻结。"
+    )
+
+    await update.effective_message.reply_text(
+        text,
+        entities=usdt_entities(text)
+    )
+
+
+# ==================================================
+# 管理员余额调整
+# ==================================================
+
+async def change_balance(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("你没有权限使用此命令。")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "用法：\n"
+            "/addbalance 用户ID 金额\n"
+            "/delbalance 用户ID 金额"
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+        amount = parse_usdt(context.args[1])
+
+        if target_id <= 0 or amount is None:
+            raise ValueError
+
+    except ValueError:
+        await update.message.reply_text("用户ID或金额格式不正确。")
+        return
+
+    if not get_user(target_id):
+        await update.message.reply_text("没有找到这个用户。")
+        return
+
+    command = update.message.text.split()[0].split("@")[0]
+
+    con = db()
+
+    try:
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        if command == "/addbalance":
+            cur.execute("""
+            UPDATE balances
+            SET balance=balance+?
+            WHERE user_id=?
+            """, (amount, target_id))
+
+            operation = "增加"
+
+        else:
+            cur.execute("""
+            UPDATE balances
+            SET balance=balance-?
+            WHERE user_id=? AND balance>=?
+            """, (amount, target_id, amount))
+
+            if cur.rowcount != 1:
+                con.rollback()
+                await update.message.reply_text("用户余额不足，无法扣除。")
+                return
+
+            operation = "扣除"
+
+        con.commit()
+
+    except Exception:
+        con.rollback()
+        logger.exception("管理员余额调整失败")
+        await update.message.reply_text("余额调整失败。")
+        return
+
+    finally:
+        con.close()
+
+    balance = get_balance(target_id)
+
+    await update.message.reply_text(
+        f"已为用户 {target_id}{operation} {format_usdt(amount)} USDT。\n"
+        f"当前余额：{format_usdt(balance)} USDT"
+    )
+
+    text = (
+        f"💰 管理员已{operation}你的 USDT 余额。\n"
+        f"{USDT_MARK} 调整金额：{format_usdt(amount)} USDT\n"
+        f"{USDT_MARK} 当前余额：{format_usdt(balance)} USDT"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=text,
+            entities=usdt_entities(text)
+        )
+    except Exception:
+        logger.exception("通知用户余额调整失败")
+
+
+# ==================================================
 # 菜单
 # ==================================================
 
@@ -321,10 +1131,7 @@ def main_keyboard(user_id):
     if current == "💬 双向联系":
         rows.insert(1, ["❌ 退出联系"])
 
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True
-    )
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def clear_mode(user_id):
@@ -340,9 +1147,45 @@ def clear_mode(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
+    old_user = get_user(user.id)
+
     register_user(user)
     clear_mode(user.id)
-    context.user_data.clear()
+
+    context.user_data.pop("withdraw_state", None)
+    context.user_data.pop("withdraw_address", None)
+
+    # 仅首次注册时处理邀请
+    if not old_user and context.args:
+        payload = context.args[0]
+
+        if payload.startswith("ref_"):
+            try:
+                inviter_id = int(payload[4:])
+
+                if bind_inviter(user.id, inviter_id):
+                    try:
+                        text = (
+                            "🎉 邀请成功！\n"
+                            "你邀请的新用户已经加入。\n"
+                            f"{USDT_MARK} 获得奖励：10 USDT"
+                        )
+
+                        await context.bot.send_message(
+                            chat_id=inviter_id,
+                            text=text,
+                            entities=usdt_entities(text)
+                        )
+
+                    except Exception:
+                        logger.exception("邀请人通知失败")
+
+                    await update.message.reply_text(
+                        "🎉 你已通过好友邀请加入机器人！"
+                    )
+
+            except ValueError:
+                pass
 
     await update.message.reply_text(
         "欢迎使用 VIP 机器人！\n请选择底部功能菜单。",
@@ -412,15 +1255,11 @@ async def points(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + custom_entity(text, VIP_MARK, VIP_EMOJI_ID)
     )
 
-    await update.message.reply_text(
-        text,
-        entities=entities
-    )
+    await update.message.reply_text(text, entities=entities)
 
 
 # ==================================================
 # 积分兑换 VIP
-# 18积分兑换30天
 # ==================================================
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -608,7 +1447,7 @@ async def vip_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================================================
-# VIP 支付流程（同一条消息编辑）
+# VIP 支付流程
 # ==================================================
 
 def vip_plan_keyboard():
@@ -674,7 +1513,6 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    # 选择套餐：编辑原消息显示支付方式
     if data.startswith("plan_"):
         plan = data.replace("plan_", "")
 
@@ -690,7 +1528,6 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 返回套餐页面
     if data == "pay_back_plan":
         clear_payment_state(user_id, context)
 
@@ -698,16 +1535,11 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             text,
-            entities=custom_entity(
-                text,
-                VIP_MARK,
-                VIP_EMOJI_ID
-            ),
+            entities=custom_entity(text, VIP_MARK, VIP_EMOJI_ID),
             reply_markup=vip_plan_keyboard()
         )
         return
 
-    # 返回支付方式页面
     if data == "pay_back_method":
         payment_waiting.discard(user_id)
 
@@ -723,11 +1555,7 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await query.edit_message_text(
                 text,
-                entities=custom_entity(
-                    text,
-                    VIP_MARK,
-                    VIP_EMOJI_ID
-                ),
+                entities=custom_entity(text, VIP_MARK, VIP_EMOJI_ID),
                 reply_markup=vip_plan_keyboard()
             )
             return
@@ -738,7 +1566,6 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 取消支付：清除状态并返回套餐页面
     if data == "pay_cancel":
         clear_payment_state(user_id, context)
 
@@ -746,16 +1573,11 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             text,
-            entities=custom_entity(
-                text,
-                VIP_MARK,
-                VIP_EMOJI_ID
-            ),
+            entities=custom_entity(text, VIP_MARK, VIP_EMOJI_ID),
             reply_markup=vip_plan_keyboard()
         )
         return
 
-    # 选择 TRC20：创建本次支付订单
     if data == "pay_trc20":
         plan = context.user_data.get("selected_plan")
 
@@ -783,16 +1605,11 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             text,
-            entities=custom_entities_all(
-                text,
-                VIP_MARK,
-                VIP_EMOJI_ID
-            ),
+            entities=custom_entities_all(text, VIP_MARK, VIP_EMOJI_ID),
             reply_markup=vip_order_keyboard(plan, "TRC20")
         )
         return
 
-    # 选择 OKPay：创建本次支付订单
     if data == "pay_okpay":
         plan = context.user_data.get("selected_plan")
 
@@ -816,16 +1633,11 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             text,
-            entities=custom_entities_all(
-                text,
-                VIP_MARK,
-                VIP_EMOJI_ID
-            ),
+            entities=custom_entities_all(text, VIP_MARK, VIP_EMOJI_ID),
             reply_markup=vip_order_keyboard(plan, "OKPay")
         )
         return
 
-    # 我已支付：编辑原消息提示提交凭证
     if data == "paid":
         plan = context.user_data.get("selected_plan")
 
@@ -872,6 +1684,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/clearvip 用户ID - 清空VIP\n"
         "/addpoints 用户ID 积分 - 增加积分\n"
         "/delpoints 用户ID 积分 - 扣除积分\n"
+        "/addbalance 用户ID 金额 - 增加USDT余额\n"
+        "/delbalance 用户ID 金额 - 扣除USDT余额\n"
         "/sendusers - 分页选择用户并主动发送消息\n"
         "/cancelmsg - 取消主动发送消息"
     )
@@ -895,10 +1709,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("SELECT COUNT(*) FROM users WHERE vip_until IS NOT NULL")
     vip_total = cur.fetchone()[0]
 
+    cur.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")
+    pending = cur.fetchone()[0]
+
+    cur.execute("SELECT COALESCE(SUM(balance),0) FROM balances")
+    total_balance = cur.fetchone()[0]
+
     con.close()
 
     await update.message.reply_text(
-        f"📊 机器人统计\n用户总数：{total}\n已开通过VIP：{vip_total}"
+        f"📊 机器人统计\n"
+        f"用户总数：{total}\n"
+        f"已开通过VIP：{vip_total}\n"
+        f"待审核提现：{pending}\n"
+        f"用户USDT余额总计：{format_usdt(total_balance)} USDT"
     )
 
 
@@ -991,6 +1815,7 @@ async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     username = f"@{row[1]}" if row[1] else "未设置"
+    balance = get_balance(target_id)
 
     text = (
         f"{user_id_line(row[0])}\n"
@@ -998,15 +1823,16 @@ async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"姓名：{row[2] or '未设置'}\n"
         f"首次使用：{row[3]}\n"
         f"积分：{row[4]}\n"
-        f"VIP到期：{row[5] or '暂未开通'}"
+        f"VIP到期：{row[5] or '暂未开通'}\n"
+        f"{USDT_MARK} USDT余额：{format_usdt(balance)}"
     )
 
-    await reply_custom(
-        update.message,
-        text,
-        USER_MARK,
-        USER_EMOJI_ID
+    entities = (
+        custom_entity(text, USER_MARK, USER_EMOJI_ID)
+        + custom_entity(text, USDT_MARK, USDT_EMOJI_ID)
     )
+
+    await update.message.reply_text(text, entities=entities)
 
 
 # ==================================================
@@ -1372,10 +2198,7 @@ async def show_admin_user_page(message, page):
     )
 
 
-async def open_admin_user_list(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def open_admin_user_list(update, context):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("你没有权限使用此功能。")
         return
@@ -1383,10 +2206,7 @@ async def open_admin_user_list(
     await show_admin_user_page(update.message, 0)
 
 
-async def admin_send_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def admin_send_callback(update, context):
     query = update.callback_query
 
     if query.from_user.id != ADMIN_ID:
@@ -1438,10 +2258,7 @@ async def admin_send_callback(
         )
 
 
-async def send_admin_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def send_admin_message(update, context):
     if update.effective_user.id != ADMIN_ID:
         return False
 
@@ -1473,12 +2290,14 @@ async def send_admin_message(
     return True
 
 
-async def cancel_admin_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def cancel_admin_message(update, context):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("你没有权限使用此命令。")
+        return
+
+    if context.user_data.get("reject_withdraw_id"):
+        context.user_data.pop("reject_withdraw_id", None)
+        await update.message.reply_text("已取消提现拒绝操作。")
         return
 
     admin_message_targets.pop(ADMIN_ID, None)
@@ -1489,13 +2308,10 @@ async def cancel_admin_message(
 
 
 # ==================================================
-# 双向联系：发送用户消息
+# 双向联系
 # ==================================================
 
-async def forward_contact_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def forward_contact_message(update, context):
     message = update.effective_message
     user = update.effective_user
 
@@ -1574,14 +2390,12 @@ async def forward_contact_message(
             "发送失败，请稍后重试。"
         )
 
+
 # ==================================================
 # 消息处理
 # ==================================================
 
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def handle_message(update, context):
     message = update.effective_message
     user = update.effective_user
 
@@ -1592,6 +2406,61 @@ async def handle_message(
 
     user_id = user.id
     text = message.text or ""
+
+    # 管理员输入提现拒绝理由
+    if user_id == ADMIN_ID and context.user_data.get("reject_withdraw_id"):
+        if text.startswith("/"):
+            return
+
+        await finish_withdraw_reject(update, context)
+        return
+
+    # 提现地址输入
+    if user_id != ADMIN_ID and context.user_data.get("withdraw_state") == "address":
+        address = text.strip()
+
+        if not TRON_ADDRESS_PATTERN.fullmatch(address):
+            await message.reply_text(
+                "❌ TRC20 地址格式不正确。\n"
+                "请检查地址，通常为 T 开头的 34 位 Base58 地址。"
+            )
+            return
+
+        context.user_data["withdraw_address"] = address
+        context.user_data["withdraw_state"] = "confirm_address"
+
+        await message.reply_text(
+            f"请仔细核对你的 TRC20 收款地址：\n\n"
+            f"<code>{address}</code>\n\n"
+            "确认地址无误后点击下面按钮。",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ 地址正确，继续",
+                        callback_data="withdraw_address_ok"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🔄 重新输入",
+                        callback_data="withdraw_address_retry"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ 取消提现",
+                        callback_data="withdraw_cancel"
+                    )
+                ]
+            ])
+        )
+        return
+
+    # 提现金额输入
+    if user_id != ADMIN_ID and context.user_data.get("withdraw_state") == "amount":
+        await create_withdrawal(update, context)
+        return
 
     # 管理员主动发送消息
     if user_id == ADMIN_ID and admin_message_targets.get(ADMIN_ID):
@@ -1680,7 +2549,15 @@ async def handle_message(
     # 退出菜单
     if text == "❌ 退出菜单":
         clear_mode(user_id)
-        context.user_data.clear()
+
+        for key in (
+            "withdraw_state",
+            "withdraw_address",
+            "selected_plan",
+            "payment_method",
+            "payment_order_active"
+        ):
+            context.user_data.pop(key, None)
 
         await message.reply_text(
             "已退出当前功能。",
@@ -1697,6 +2574,9 @@ async def handle_message(
         "💎 VIP会员",
         "✈️ VIP功能",
         "✈️ VIP功能 ✅",
+        "💰 我的余额",
+        "🔗 邀请好友",
+        "💸 申请提现",
         "🖼 NFT查询",
         "📱 +888号码查询",
         "👤 收藏用户名查询",
@@ -1706,7 +2586,12 @@ async def handle_message(
 
     if text in menu_items:
         clear_mode(user_id)
-        context.user_data.clear()
+
+        for key in (
+            "withdraw_state",
+            "withdraw_address"
+        ):
+            context.user_data.pop(key, None)
 
         if text == "💬 双向联系":
             user_modes[user_id] = "💬 双向联系"
@@ -1721,7 +2606,6 @@ async def handle_message(
                 CONTACT_EMOJI_ID,
                 reply_markup=main_keyboard(user_id)
             )
-
             return
 
         if text == "👤 我的资料":
@@ -1735,7 +2619,6 @@ async def handle_message(
                 "请转发你想查询的 Telegram 用户消息给我。\n"
                 "如果对方隐藏了转发来源，可能无法查询。"
             )
-
             return
 
         if text in ("VIP会员", "💎 VIP会员"):
@@ -1744,6 +2627,18 @@ async def handle_message(
 
         if text in ("✈️ VIP功能", "✈️ VIP功能 ✅"):
             await vip_feature(update, context)
+            return
+
+        if text == "💰 我的余额":
+            await show_balance(update, context)
+            return
+
+        if text == "🔗 邀请好友":
+            await show_invite(update, context)
+            return
+
+        if text == "💸 申请提现":
+            await begin_withdraw(update, context)
             return
 
         if text == "🖼 NFT查询":
@@ -1785,7 +2680,6 @@ async def handle_message(
                 ADMIN_EMOJI_ID,
                 reply_markup=keyboard
             )
-
             return
 
     # 查询转发消息中的用户ID
@@ -1823,7 +2717,6 @@ async def handle_message(
         await forward_contact_message(update, context)
         return
 
-    # 其他消息
     if user_id != ADMIN_ID:
         await message.reply_text(
             "请选择底部菜单中的功能，或发送 /help 查看帮助。",
@@ -1832,13 +2725,53 @@ async def handle_message(
 
 
 # ==================================================
+# 提现地址按钮回调
+# ==================================================
+
+async def withdraw_address_callback(update, context):
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    await query.answer()
+
+    if query.data == "withdraw_address_ok":
+        if context.user_data.get("withdraw_state") != "confirm_address":
+            await query.answer("地址状态已失效。", show_alert=True)
+            return
+
+        context.user_data["withdraw_state"] = "amount"
+
+        balance = get_balance(user_id)
+
+        text = (
+            f"{USDT_MARK} 当前余额：{format_usdt(balance)} USDT\n\n"
+            "请输入本次提现金额。\n"
+            "最低提现金额：10 USDT\n"
+            "手续费：1 USDT\n\n"
+            "例如申请20 USDT，实际到账19 USDT。"
+        )
+
+        await query.edit_message_text(
+            text,
+            entities=usdt_entities(text)
+        )
+        return
+
+    if query.data == "withdraw_address_retry":
+        context.user_data["withdraw_state"] = "address"
+        context.user_data.pop("withdraw_address", None)
+
+        await query.edit_message_text(
+            "请重新发送你的 TRC20 USDT 收款地址。"
+        )
+        return
+
+
+# ==================================================
 # 帮助
 # ==================================================
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def help_command(update, context):
     await update.message.reply_text(
         "机器人使用说明：\n\n"
         "/start - 打开机器人\n"
@@ -1855,7 +2788,7 @@ async def help_command(
 # 命令设置
 # ==================================================
 
-async def post_init(application: Application):
+async def post_init(application):
     user_commands = [
         BotCommand("start", "打开机器人"),
         BotCommand("qd", "每日签到"),
@@ -1876,6 +2809,8 @@ async def post_init(application: Application):
         BotCommand("clearvip", "清空VIP"),
         BotCommand("addpoints", "增加积分"),
         BotCommand("delpoints", "扣除积分"),
+        BotCommand("addbalance", "增加USDT余额"),
+        BotCommand("delbalance", "扣除USDT余额"),
         BotCommand("sendusers", "分页选择用户发送消息"),
         BotCommand("cancelmsg", "取消主动发送消息"),
     ]
@@ -1927,7 +2862,9 @@ def main():
     application.add_handler(CommandHandler("addpoints", change_points))
     application.add_handler(CommandHandler("delpoints", change_points))
 
-    # 管理员分页发送消息
+    application.add_handler(CommandHandler("addbalance", change_balance))
+    application.add_handler(CommandHandler("delbalance", change_balance))
+
     application.add_handler(
         CommandHandler("sendusers", open_admin_user_list)
     )
@@ -1936,7 +2873,7 @@ def main():
         CommandHandler("cancelmsg", cancel_admin_message)
     )
 
-    # 管理员回调
+    # 管理员用户分页回调
     application.add_handler(
         CallbackQueryHandler(
             admin_send_callback,
@@ -1944,7 +2881,23 @@ def main():
         )
     )
 
-    # VIP 支付回调
+    # 提现审核回调
+    application.add_handler(
+        CallbackQueryHandler(
+            withdraw_callback,
+            pattern=r"^withdraw_(?:approve_|reject_|cancel$)"
+        )
+    )
+
+    # 提现地址确认回调
+    application.add_handler(
+        CallbackQueryHandler(
+            withdraw_address_callback,
+            pattern=r"^withdraw_address_(?:ok|retry)$"
+        )
+    )
+
+    # VIP支付回调
     application.add_handler(
         CallbackQueryHandler(
             payment_callback,
@@ -1952,7 +2905,7 @@ def main():
         )
     )
 
-    # VIP按钮单独处理，保留原来的功能
+    # VIP功能
     application.add_handler(
         MessageHandler(
             filters.Regex(r"^✈️ VIP功能(?: ✅)?$"),
