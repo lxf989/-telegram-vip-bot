@@ -550,7 +550,8 @@ async def vip_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # VIP有效，发送图片
-    caption = f"{VIP_FEATURE_MARK} 你好，欢迎开通VIP，谢谢支持！"
+    caption = f"{VIP_FEATURE_MARK} 你好 欢迎开通VIP 谢谢支持！
+    操你妈妈👵还开VIP 人傻钱多"
 
     entities = custom_entity(
         caption,
