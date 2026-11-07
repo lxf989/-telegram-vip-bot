@@ -3564,16 +3564,27 @@ async def handle_message(update, context):
         return
 
     # 双向联系
-    if text == "💬 双向联系" or user_id in contact_waiting:
-        contact_waiting.add(user_id)
+    # 双向联系开启按钮
+    if text == "💬 双向联系":
+    contact_waiting.add(user_id)
 
-        if text == "💬 双向联系":
-            await message.reply_text(
-                "请直接发送你要联系管理员的内容。\n"
-                "支持文字、图片、视频及文件。\n"
-                "发送 /cancel 可取消。"
-            )
-            return
+    await update.message.reply_text(
+        "6131651403766045300 双向联系已开启。\n"
+        "你发送的消息会转发给管理员，管理员回复后会转发给你。\n"
+        "点击「❌ 退出联系」即可结束。"
+    )
+    return
+
+    # 退出双向联系
+    if text == "❌ 退出联系":
+    contact_waiting.discard(user_id)
+    await update.message.reply_text("❌ 双向联系已关闭。")
+    return
+
+    # 已开启联系：允许连续发送
+    if user_id in contact_waiting:
+    await forward_contact_message(update, context)
+    return
 
     if user_id in contact_waiting:
         if text == "/cancel":
