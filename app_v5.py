@@ -1574,6 +1574,61 @@ async def withdraw_callback(update, context):
 
         return
 
+        # 用户确认最终提现：必须在管理员权限判断之前处理
+    if data == "withdraw_final_confirm":
+        user_id = query.from_user.id
+
+        if is_wallet_frozen(user_id):
+            await query.answer(
+                "钱包已冻结，无法提现。",
+                show_alert=True
+            )
+            return
+
+        if context.user_data.get("withdraw_state") != "final_confirm":
+            await query.answer(
+                "提现状态已失效，请重新申请。",
+                show_alert=True
+            )
+            return
+
+        address = context.user_data.get("withdraw_address")
+        amount = context.user_data.get("withdraw_amount")
+
+        if not address or not amount:
+            await query.answer(
+                "提现信息不完整，请重新申请。",
+                show_alert=True
+            )
+            return
+
+        await query.answer("正在提交提现申请……")
+
+        success, result = await create_withdrawal(
+            user_id,
+            address,
+            amount,
+            context,
+            query.message.chat_id
+        )
+
+        if not success:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"提现申请失败：{result}"
+            )
+            return
+
+        try:
+            await query.edit_message_text(
+                f"✅ 提现申请已提交！\n\n订单编号：#{result}\n请等待管理员审核。"
+            )
+        except Exception:
+            pass
+
+        return
+
+    # 以下才是管理员审核操作
     if query.from_user.id != ADMIN_ID:
         await query.answer(
             "无权操作。",
