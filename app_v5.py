@@ -1,162 +1,48 @@
 import os
 import sqlite3
 import logging
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from telegram import (
     Update,
-    ReplyKeyboardMarkup,
-    InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
     BotCommand,
-    BotCommandScopeChat,
-    MessageEntity,
 )
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
     filters,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
+# =========================
+# 基础配置
+# =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8957110767"))
 
-USDT_ADDRESS = os.getenv(
-    "USDT_ADDRESS",
-    "THSbZXqnnLUAzfgYkv9AavBD4YdHTTzNxz"
-)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8957110767"))
 
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
 
-# VIP 图片：GitHub 原始图片地址
-VIP_FLAG_IMAGE = "https://raw.githubusercontent.com/lxf989/-telegram-vip-bot/main/1E6D4C30-CAB6-448E-9D9A-2265307D5075.png?utm_source=chatgpt.com"
+USER_PAGE_SIZE = 20
 
-# 高级表情 ID
-VIP_EMOJI_ID = "5235630047959727475"
-USER_EMOJI_ID = "6210879471474447673"
-CONTACT_EMOJI_ID = "5443038326535759644"
-ADMIN_EMOJI_ID = "5330237710655306682"
-POINTS_EMOJI_ID = "5408869739982246969"
-CHECKIN_EMOJI_ID = "5449800250032143374"
-VIP_FEATURE_EMOJI_ID = "5255907722435501318"
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
-# 高级表情占位符
-VIP_MARK = "⭐"
-USER_MARK = "⭐"
-CONTACT_MARK = "⭐"
-ADMIN_MARK = "⭐"
-POINTS_MARK = "⭐"
-CHECKIN_MARK = "⭐"
-VIP_FEATURE_MARK = "⭐"
+logger = logging.getLogger(__name__)
 
-# 底部菜单
-MENU = [
-    ["💬 双向联系", "👤 我的资料"],
-    ["🆔 查询用户ID", "💎 VIP会员"],
-    ["✈️ VIP功能"],
-    ["🖼 NFT查询", "📱 +888号码查询"],
-    ["👤 收藏用户名查询"],
-    ["🎁 每日签到", "👨‍💻 联系管理员"],
-    ["❌ 退出菜单"],
-]
+# 管理员当前选择的发消息目标
+admin_message_targets = {}
 
-PLANS = {
-    "7天": (1, 7),
-    "30天": (2, 30),
-    "90天": (5, 90),
-    "365天": (10, 365),
-}
-
-OKPAY_LINKS = {
-    "7天": "https://t.me/OkayPayBot?start=transfer_by_text--ODk1NzExMDc2NyAxLjAw",
-    "30天": "https://t.me/OkayPayBot?start=transfer_by_text--ODk1NzExMDc2NyAyLjAw",
-    "90天": "https://t.me/OkayPayBot?start=transfer_by_text--ODk1NzExMDc2NyA1LjAw",
-    "365天": "https://t.me/OkayPayBot?start=transfer_by_text--ODk1NzExMDc2NyAxMC4wMA==",
-}
-
-user_modes = {}
+# 用户双向联系状态
 contact_waiting = set()
-payment_waiting = set()
-
-
-# =========================
-# 高级表情工具
-# =========================
-
-def custom_entity(text, marker, emoji_id):
-    index = text.find(marker)
-
-    if index < 0:
-        return []
-
-    offset = len(text[:index].encode("utf-16-le")) // 2
-    length = len(marker.encode("utf-16-le")) // 2
-
-    return [
-        MessageEntity(
-            type="custom_emoji",
-            offset=offset,
-            length=length,
-            custom_emoji_id=emoji_id
-        )
-    ]
-
-
-def custom_entities_all(text, marker, emoji_id):
-    entities = []
-    start = 0
-
-    while True:
-        index = text.find(marker, start)
-
-        if index < 0:
-            break
-
-        offset = len(text[:index].encode("utf-16-le")) // 2
-        length = len(marker.encode("utf-16-le")) // 2
-
-        entities.append(
-            MessageEntity(
-                type="custom_emoji",
-                offset=offset,
-                length=length,
-                custom_emoji_id=emoji_id
-            )
-        )
-
-        start = index + len(marker)
-
-    return entities
-
-
-async def reply_custom(message, text, marker, emoji_id, **kwargs):
-    return await message.reply_text(
-        text,
-        entities=custom_entity(text, marker, emoji_id),
-        **kwargs
-    )
-
-
-async def send_custom(bot, chat_id, text, marker, emoji_id, **kwargs):
-    return await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        entities=custom_entities_all(text, marker, emoji_id),
-        **kwargs
-    )
-
-
-def user_id_line(user_id):
-    return f"{USER_MARK} 用户：{user_id}"
 
 
 # =========================
@@ -172,29 +58,29 @@ def init_db():
     cur = con.cursor()
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        first_seen TEXT,
-        points INTEGER DEFAULT 0,
-        vip_until TEXT
-    )
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            first_seen TEXT,
+            points INTEGER DEFAULT 0,
+            vip_until TEXT
+        )
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS checkins (
-        user_id INTEGER,
-        check_date TEXT,
-        UNIQUE(user_id, check_date)
-    )
+        CREATE TABLE IF NOT EXISTS checkins (
+            user_id INTEGER,
+            check_date TEXT,
+            UNIQUE(user_id, check_date)
+        )
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS replies (
-        admin_message_id INTEGER PRIMARY KEY,
-        user_id INTEGER
-    )
+        CREATE TABLE IF NOT EXISTS replies (
+            admin_message_id INTEGER PRIMARY KEY,
+            user_id INTEGER
+        )
     """)
 
     con.commit()
@@ -206,25 +92,21 @@ def register_user(user):
     cur = con.cursor()
 
     cur.execute("""
-    INSERT OR IGNORE INTO users
-    (user_id, username, first_name, first_seen)
-    VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO users
+        (user_id, username, first_name, first_seen, points, vip_until)
+        VALUES (?, ?, ?, ?, 0, NULL)
     """, (
         user.id,
-        user.username or "",
-        user.first_name or "",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user.username,
+        user.first_name,
+        datetime.now().isoformat(sep=" ", timespec="seconds"),
     ))
 
     cur.execute("""
-    UPDATE users
-    SET username=?, first_name=?
-    WHERE user_id=?
-    """, (
-        user.username or "",
-        user.first_name or "",
-        user.id
-    ))
+        UPDATE users
+        SET username=?, first_name=?
+        WHERE user_id=?
+    """, (user.username, user.first_name, user.id))
 
     con.commit()
     con.close()
@@ -239,108 +121,208 @@ def get_user(user_id):
         (user_id,)
     )
 
-    result = cur.fetchone()
+    row = cur.fetchone()
     con.close()
 
-    return result
+    return row
 
 
-def save_reply_message(admin_message_id, user_id):
+def get_all_users():
     con = db()
     cur = con.cursor()
 
     cur.execute("""
-    INSERT OR REPLACE INTO replies
-    (admin_message_id, user_id)
-    VALUES (?, ?)
-    """, (admin_message_id, user_id))
+        SELECT user_id, username, first_name
+        FROM users
+        ORDER BY first_seen DESC
+    """)
 
-    con.commit()
+    rows = cur.fetchall()
     con.close()
 
+    return rows
 
-def get_reply_user(admin_message_id):
+
+def get_user_count():
     con = db()
     cur = con.cursor()
 
-    cur.execute(
-        "SELECT user_id FROM replies WHERE admin_message_id=?",
-        (admin_message_id,)
-    )
+    cur.execute("SELECT COUNT(*) FROM users")
+    count = cur.fetchone()[0]
 
-    result = cur.fetchone()
     con.close()
-
-    return result[0] if result else None
+    return count
 
 
 # =========================
-# 菜单
+# 用户菜单
 # =========================
 
 def main_keyboard(user_id):
-    current = user_modes.get(user_id)
-    rows = []
+    keyboard = [
+        ["👤 个人中心", "⭐ 积分查询"],
+        ["📅 每日签到", "💎 VIP套餐"],
+        ["🎁 积分兑换VIP", "📞 联系管理员"],
+    ]
 
-    for row in MENU:
-        new_row = []
-
-        for button in row:
-            if button == current:
-                button += " ✅"
-
-            new_row.append(button)
-
-        rows.append(new_row)
-
-    if current == "💬 双向联系":
-        rows.insert(1, ["❌ 退出联系"])
+    if user_id == ADMIN_ID:
+        keyboard.append(["📨 给用户发消息", "⚙️ 管理员面板"])
 
     return ReplyKeyboardMarkup(
-        rows,
+        keyboard,
         resize_keyboard=True
     )
 
 
-def clear_mode(user_id):
-    user_modes.pop(user_id, None)
-    contact_waiting.discard(user_id)
-    payment_waiting.discard(user_id)
+# =========================
+# VIP状态
+# =========================
+
+def get_vip_status(user_id):
+    row = get_user(user_id)
+
+    if not row or not row[5]:
+        return False, None
+
+    try:
+        expiry = datetime.fromisoformat(row[5])
+    except (ValueError, TypeError):
+        return False, None
+
+    if expiry <= datetime.now():
+        return False, expiry
+
+    return True, expiry
+
+
+def add_vip_days(user_id, days):
+    row = get_user(user_id)
+
+    if not row:
+        return False
+
+    now = datetime.now()
+
+    if row[5]:
+        try:
+            expiry = datetime.fromisoformat(row[5])
+        except (ValueError, TypeError):
+            expiry = now
+    else:
+        expiry = now
+
+    if expiry < now:
+        expiry = now
+
+    new_expiry = expiry + timedelta(days=days)
+
+    con = db()
+    cur = con.cursor()
+
+    cur.execute(
+        "UPDATE users SET vip_until=? WHERE user_id=?",
+        (
+            new_expiry.isoformat(sep=" ", timespec="seconds"),
+            user_id,
+        )
+    )
+
+    con.commit()
+    con.close()
+
+    return True
 
 
 # =========================
-# 开始
+# 通知用户
+# =========================
+
+async def notify_user(bot, user_id, message):
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=message
+        )
+        return True
+
+    except Exception:
+        logger.exception("通知用户失败：%s", user_id)
+        return False
+        
+        # =========================
+# /start
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-
     register_user(user)
-    clear_mode(user.id)
-    context.user_data.clear()
 
     await update.message.reply_text(
-        "欢迎使用 VIP 机器人！\n请选择底部功能菜单。",
+        f"你好，{user.first_name}！欢迎使用VIP机器人。",
         reply_markup=main_keyboard(user.id)
     )
 
 
 # =========================
-# 签到
+# 个人中心
+# =========================
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    register_user(update.effective_user)
+
+    row = get_user(user_id)
+
+    if not row:
+        await update.message.reply_text("用户信息不存在。")
+        return
+
+    is_vip, expiry = get_vip_status(user_id)
+
+    vip_text = (
+        f"有效，到期时间：{expiry.strftime('%Y-%m-%d %H:%M:%S')}"
+        if is_vip else "未开通或已到期"
+    )
+
+    await update.message.reply_text(
+        f"👤 个人中心\n\n"
+        f"用户ID：{user_id}\n"
+        f"用户名：@{row[1] or '无'}\n"
+        f"积分：{row[4]}\n"
+        f"VIP状态：{vip_text}"
+    )
+
+
+# =========================
+# 积分查询
+# =========================
+
+async def points(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user)
+
+    row = get_user(update.effective_user.id)
+
+    await update.message.reply_text(
+        f"⭐ 你的积分：{row[4]}"
+    )
+
+
+# =========================
+# 每日签到
 # =========================
 
 async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-
     register_user(user)
-    today = date.today().isoformat()
+
+    today = datetime.now().strftime("%Y-%m-%d")
 
     con = db()
     cur = con.cursor()
 
     try:
         cur.execute(
-            "INSERT INTO checkins VALUES (?, ?)",
+            "INSERT INTO checkins (user_id, check_date) VALUES (?, ?)",
             (user.id, today)
         )
 
@@ -354,362 +336,237 @@ async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = get_user(user.id)
 
         await update.message.reply_text(
-            f"🎁 签到成功！获得1积分。\n当前积分：{row[4]}"
+            f"✅ 签到成功！获得1积分。\n当前积分：{row[4]}"
         )
 
     except sqlite3.IntegrityError:
-        await update.message.reply_text(
-            "今天已经签到过了，明天再来吧！"
-        )
+        await update.message.reply_text("今天已经签到过了，明天再来吧！")
 
     finally:
         con.close()
 
 
 # =========================
-# 积分
+# VIP套餐
 # =========================
 
-async def points(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    register_user(update.effective_user)
-
-    row = get_user(update.effective_user.id)
-
-    text = (
-        f"{POINTS_MARK} 当前积分：{row[4]}\n"
-        f"{CHECKIN_MARK} 每日签到可获得1积分。\n"
-        f"{VIP_MARK} 满18积分可兑换30天VIP。"
-    )
-
-    entities = (
-        custom_entity(text, POINTS_MARK, POINTS_EMOJI_ID)
-        + custom_entity(text, CHECKIN_MARK, CHECKIN_EMOJI_ID)
-        + custom_entity(text, VIP_MARK, VIP_EMOJI_ID)
-    )
+async def vip_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("7天VIP - 1 USDT", callback_data="plan_7")],
+        [InlineKeyboardButton("30天VIP - 2 USDT", callback_data="plan_30")],
+        [InlineKeyboardButton("90天VIP - 5 USDT", callback_data="plan_90")],
+        [InlineKeyboardButton("365天VIP - 10 USDT", callback_data="plan_365")],
+    ]
 
     await update.message.reply_text(
-        text,
-        entities=entities
+        "💎 VIP套餐\n\n请选择你需要的VIP时长：",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 # =========================
 # 积分兑换VIP
+# 18积分兑换30天
 # =========================
 
-async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def exchange_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     register_user(update.effective_user)
 
     row = get_user(user_id)
 
     if row[4] < 18:
         await update.message.reply_text(
-            f"积分不足，目前有 {row[4]} 积分。\n兑换需要18积分。"
+            f"积分不足！\n当前积分：{row[4]}\n需要积分：18"
         )
         return
-
-    now = datetime.now()
-
-    if row[5]:
-        try:
-            old = datetime.fromisoformat(row[5])
-
-            if old > now:
-                now = old
-
-        except ValueError:
-            pass
-
-    expiry = (now + timedelta(days=30)).isoformat(
-        sep=" ",
-        timespec="seconds"
-    )
 
     con = db()
     cur = con.cursor()
 
     cur.execute(
-        "UPDATE users SET points=points-18, vip_until=? WHERE user_id=?",
-        (expiry, user_id)
+        "UPDATE users SET points=points-18 WHERE user_id=?",
+        (user_id,)
     )
 
     con.commit()
     con.close()
 
-    await reply_custom(
-        update.message,
-        f"{VIP_MARK} 兑换成功！已开通30天VIP。\n到期时间：{expiry}",
-        VIP_MARK,
-        VIP_EMOJI_ID
+    add_vip_days(user_id, 30)
+
+    row = get_user(user_id)
+
+    await update.message.reply_text(
+        f"🎉 兑换成功！\n"
+        f"已兑换30天VIP。\n"
+        f"剩余积分：{row[4]}"
     )
 
 
 # =========================
-# 查询自己的ID
+# /myid
 # =========================
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "你的 Telegram 用户ID：\n"
-        f"{user_id_line(update.effective_user.id)}"
-    )
-
-    await reply_custom(
-        update.message,
-        text,
-        USER_MARK,
-        USER_EMOJI_ID
+    await update.message.reply_text(
+        f"你的用户ID：{update.effective_user.id}"
     )
 
 
 # =========================
-# 个人资料
+# 管理员：减少VIP
+# /reducevip 用户ID 天数
 # =========================
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    register_user(user)
-
-    row = get_user(user.id)
-
-    username = f"@{user.username}" if user.username else "未设置"
-
-    text = (
-        "👤 个人资料\n\n"
-        f"姓名：{user.first_name or '未设置'}\n"
-        f"用户名：{username}\n"
-        f"{user_id_line(user.id)}\n"
-        f"首次使用：{row[3]}\n"
-        f"积分：{row[4]}\n"
-        f"VIP到期：{row[5] or '暂未开通'}"
-    )
-
-    await reply_custom(
-        update.message,
-        text,
-        USER_MARK,
-        USER_EMOJI_ID
-    )
-
-
-# =========================
-# VIP套餐
-# =========================
-
-async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("7天 VIP · 1 USDT", callback_data="plan_7天")],
-        [InlineKeyboardButton("30天 VIP · 2 USDT", callback_data="plan_30天")],
-        [InlineKeyboardButton("90天 VIP · 5 USDT", callback_data="plan_90天")],
-        [InlineKeyboardButton("365天 VIP · 10 USDT", callback_data="plan_365天")],
-    ]
-
-    await reply_custom(
-        update.message,
-        f"{VIP_MARK} 请选择 VIP 套餐：",
-        VIP_MARK,
-        VIP_EMOJI_ID,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# VIP功能图片
-# =========================
-
-async def vip_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    # 查询用户VIP资料
-    row = get_user(user_id)
-
-    # 未开通VIP
-    if not row or not row[5]:
-        await update.effective_message.reply_text(
-            "❌ 此功能仅限 VIP 会员使用，请先开通 VIP。"
-        )
-        return
-
-    # 检查VIP是否到期
-    try:
-        vip_until = datetime.fromisoformat(row[5])
-
-        if vip_until <= datetime.now():
-            await update.effective_message.reply_text(
-                "❌ 你的 VIP 已到期，请续费后使用此功能。"
-            )
-            return
-
-    except (ValueError, TypeError):
-        await update.effective_message.reply_text(
-            "❌ VIP信息异常，请联系管理员处理。"
-        )
-        return
-
-    # VIP有效，发送图片
-    caption = f"{VIP_FEATURE_MARK} 你好 欢迎开通VIP 谢谢支持！操你妈妈👵还开VIP人傻钱多"
-
-    entities = custom_entity(
-        caption,
-        VIP_FEATURE_MARK,
-        VIP_FEATURE_EMOJI_ID
-    )
-
-    try:
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=VIP_FLAG_IMAGE,
-            caption=caption,
-            caption_entities=entities
-        )
-
-    except Exception:
-        logging.exception("VIP图片发送失败")
-
-        await update.effective_message.reply_text(
-            "VIP图片发送失败，请稍后再试。"
-        )
-
-
-# =========================
-# 支付流程
-# =========================
-
-async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-
-    await query.answer()
-
-    user_id = query.from_user.id
-    data = query.data
-
-    if data.startswith("plan_"):
-        plan = data.replace("plan_", "")
-
-        if plan not in PLANS:
-            return
-
-        context.user_data["selected_plan"] = plan
-
-        keyboard = [
-            [InlineKeyboardButton("TRC20（USDT）", callback_data="pay_trc20")],
-            [InlineKeyboardButton("OKPay", callback_data="pay_okpay")],
-        ]
-
-        await query.message.reply_text(
-            f"已选择 {plan} VIP。\n请选择支付方式：",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    elif data == "pay_trc20":
-        plan = context.user_data.get("selected_plan")
-
-        if not plan:
-            await query.message.reply_text(
-                "请重新进入 VIP 会员页面选择套餐。"
-            )
-            return
-
-        amount, days = PLANS[plan]
-
-        context.user_data["payment_method"] = "TRC20"
-
-        keyboard = [
-            [InlineKeyboardButton("📋 我已支付", callback_data="paid")]
-        ]
-
-        text = (
-            f"{VIP_MARK} 套餐：{plan} VIP\n"
-            f"金额：{amount} USDT\n\n"
-            "请使用 TRC20 网络转账至以下地址：\n"
-            f"`{USDT_ADDRESS}`\n\n"
-            "转账完成后，点击“我已支付”，提交交易凭证。"
-        )
-
-        await send_custom(
-            context.bot,
-            query.message.chat_id,
-            text,
-            VIP_MARK,
-            VIP_EMOJI_ID,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    elif data == "pay_okpay":
-        plan = context.user_data.get("selected_plan")
-
-        if not plan:
-            await query.message.reply_text(
-                "请重新进入 VIP 会员页面选择套餐。"
-            )
-            return
-
-        context.user_data["payment_method"] = "OKPay"
-
-        keyboard = [
-            [InlineKeyboardButton(
-                "前往 OKPay 支付",
-                url=OKPAY_LINKS[plan]
-            )],
-            [InlineKeyboardButton("📋 我已支付", callback_data="paid")]
-        ]
-
-        text = (
-            f"{VIP_MARK} 套餐：{plan} VIP\n"
-            f"金额：{PLANS[plan][0]} USDT\n\n"
-            "点击下方按钮前往 OKPay。支付完成后，请回来提交凭证。"
-        )
-
-        await send_custom(
-            context.bot,
-            query.message.chat_id,
-            text,
-            VIP_MARK,
-            VIP_EMOJI_ID,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    elif data == "paid":
-        plan = context.user_data.get("selected_plan")
-
-        if not plan:
-            await query.message.reply_text("请先选择 VIP 套餐。")
-            return
-
-        payment_waiting.add(user_id)
-
-        await query.message.reply_text(
-            f"请发送你的 {plan} VIP 支付凭证或交易 TXID。\n"
-            "管理员核实到账后会为你开通 VIP。"
-        )
-
-
-# =========================
-# 管理员菜单
-# =========================
-
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reduce_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("你没有权限使用此命令。")
         return
 
-    await update.message.reply_text(
-        "管理员命令：\n"
-        "/stats - 查看统计\n"
-        "/users - 查看所有用户\n"
-        "/user 用户ID - 查看用户资料\n"
-        "/approve 用户ID 天数 - 开通VIP\n"
-        "/addpoints 用户ID 积分 - 增加积分\n"
-        "/delpoints 用户ID 积分 - 扣除积分"
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "用法：/reducevip 用户ID 天数"
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+        days = int(context.args[1])
+
+        if target_id <= 0 or days <= 0:
+            raise ValueError
+
+    except ValueError:
+        await update.message.reply_text(
+            "用户ID和天数必须是正整数。"
+        )
+        return
+
+    row = get_user(target_id)
+
+    if not row:
+        await update.message.reply_text("没有找到这个用户。")
+        return
+
+    if not row[5]:
+        await update.message.reply_text("该用户目前没有VIP。")
+        return
+
+    try:
+        expiry = datetime.fromisoformat(row[5])
+    except (ValueError, TypeError):
+        await update.message.reply_text("用户VIP到期时间异常。")
+        return
+
+    now = datetime.now()
+
+    if expiry.tzinfo is not None:
+        now = datetime.now(expiry.tzinfo)
+
+    if expiry <= now:
+        await update.message.reply_text("该用户VIP已经到期。")
+        return
+
+    new_expiry = expiry - timedelta(days=days)
+
+    if new_expiry <= now:
+        new_expiry_text = None
+        result = "VIP剩余时间已扣完，已取消该用户VIP。"
+    else:
+        new_expiry_text = new_expiry.isoformat(
+            sep=" ",
+            timespec="seconds"
+        )
+
+        result = (
+            f"已减少用户 {target_id} 的 {days} 天VIP。\n"
+            f"新的到期时间：{new_expiry_text}"
+        )
+
+    con = db()
+
+    try:
+        cur = con.cursor()
+
+        cur.execute(
+            "UPDATE users SET vip_until=? WHERE user_id=?",
+            (new_expiry_text, target_id)
+        )
+
+        con.commit()
+
+    finally:
+        con.close()
+
+    await update.message.reply_text("✅ " + result)
+
+    await notify_user(
+        context.bot,
+        target_id,
+        "管理员调整了你的VIP时长。\n" + result
     )
 
 
 # =========================
-# 统计
+# 管理员：清空VIP
+# /clearvip 用户ID
+# =========================
+
+async def clear_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("你没有权限使用此命令。")
+        return
+
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "用法：/clearvip 用户ID"
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+
+        if target_id <= 0:
+            raise ValueError
+
+    except ValueError:
+        await update.message.reply_text("用户ID必须是正整数。")
+        return
+
+    row = get_user(target_id)
+
+    if not row:
+        await update.message.reply_text("没有找到这个用户。")
+        return
+
+    con = db()
+
+    try:
+        cur = con.cursor()
+
+        cur.execute(
+            "UPDATE users SET vip_until=NULL WHERE user_id=?",
+            (target_id,)
+        )
+
+        con.commit()
+
+    finally:
+        con.close()
+
+    await update.message.reply_text(
+        f"✅ 已成功清空用户 {target_id} 的VIP。"
+    )
+
+    await notify_user(
+        context.bot,
+        target_id,
+        "管理员已取消你的VIP资格。"
+    )
+
+
+# =========================
+# 管理员：统计
 # =========================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -721,649 +578,530 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = con.cursor()
 
     cur.execute("SELECT COUNT(*) FROM users")
-    total = cur.fetchone()[0]
+    total_users = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM users WHERE vip_until IS NOT NULL")
-    vip_total = cur.fetchone()[0]
+    cur.execute(
+        "SELECT COUNT(*) FROM users WHERE vip_until IS NOT NULL"
+    )
+    total_vip = cur.fetchone()[0]
+
+    cur.execute("SELECT SUM(points) FROM users")
+    total_points = cur.fetchone()[0] or 0
 
     con.close()
 
     await update.message.reply_text(
-        f"📊 机器人统计\n用户总数：{total}\n已开通过VIP：{vip_total}"
+        f"📊 机器人统计\n\n"
+        f"用户总数：{total_users}\n"
+        f"VIP记录数：{total_vip}\n"
+        f"积分总数：{total_points}"
     )
-
-
+    
+    # =========================
+# 管理员用户分页
 # =========================
-# 用户名单
-# =========================
 
-async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("你没有权限查看用户名单。")
-        return
-
+def get_users_page(page=0):
     con = db()
     cur = con.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM users")
+    total = cur.fetchone()[0]
+
+    total_pages = max(1, (total + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE)
+
+    page = max(0, min(page, total_pages - 1))
 
     cur.execute("""
         SELECT user_id, username, first_name
         FROM users
-        ORDER BY first_seen ASC, user_id ASC
-    """)
+        ORDER BY first_seen DESC
+        LIMIT ? OFFSET ?
+    """, (USER_PAGE_SIZE, page * USER_PAGE_SIZE))
 
     rows = cur.fetchall()
     con.close()
 
-    if not rows:
-        await update.message.reply_text("目前还没有用户记录。")
-        return
-
-    messages = []
-    current = ""
-
-    for index, row in enumerate(rows, start=1):
-        user_id, username, first_name = row
-
-        username_text = f"@{username}" if username else "未设置"
-        name_text = first_name or "未设置"
-
-        item = (
-            f"{index}. 用户名：{username_text}\n"
-            f"   姓名：{name_text}\n"
-            f"   {user_id_line(user_id)}\n\n"
-        )
-
-        if len(current) + len(item) > 3500:
-            messages.append(current)
-            current = ""
-
-        current += item
-
-    if current:
-        messages.append(current)
-
-    for part in messages:
-        await send_custom(
-            context.bot,
-            update.effective_chat.id,
-            part,
-            USER_MARK,
-            USER_EMOJI_ID
-        )
-
-    await update.message.reply_text(
-        f"✅ 用户名单结束\n用户总人数：{len(rows)}"
-    )
+    return rows, total, total_pages, page
 
 
 # =========================
-# 查看用户资料
+# 显示管理员用户列表
 # =========================
 
-async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("你没有权限使用此命令。")
-        return
+async def show_admin_user_page(query, page=0):
+    rows, total, total_pages, page = get_users_page(page)
 
-    if not context.args:
-        await update.message.reply_text("用法：/user 用户ID")
-        return
+    keyboard = []
 
-    try:
-        target_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("用户ID必须是数字。")
-        return
+    for user_id, username, first_name in rows:
+        name = first_name or "未设置姓名"
+        username_text = f"@{username}" if username else "无用户名"
 
-    row = get_user(target_id)
+        button_text = f"{name} | {username_text} | {user_id}"
 
-    if not row:
-        await update.message.reply_text("没有找到这个用户。")
-        return
+        if len(button_text) > 60:
+            button_text = button_text[:57] + "..."
 
-    username = f"@{row[1]}" if row[1] else "未设置"
+        keyboard.append([
+            InlineKeyboardButton(
+                button_text,
+                callback_data=f"msg_user_{user_id}"
+            )
+        ])
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ 上一页",
+                callback_data=f"msg_page_{page - 1}"
+            )
+        )
+
+    if page < total_pages - 1:
+        navigation.append(
+            InlineKeyboardButton(
+                "下一页 ➡️",
+                callback_data=f"msg_page_{page + 1}"
+            )
+        )
+
+    if navigation:
+        keyboard.append(navigation)
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "❌ 退出发消息",
+            callback_data="msg_exit"
+        )
+    ])
 
     text = (
-        f"{user_id_line(row[0])}\n"
-        f"用户名：{username}\n"
-        f"姓名：{row[2] or '未设置'}\n"
-        f"首次使用：{row[3]}\n"
-        f"积分：{row[4]}\n"
-        f"VIP到期：{row[5] or '暂未开通'}"
+        f"📨 管理员发消息\n\n"
+        f"当前用户总数：{total}\n"
+        f"第 {page + 1}/{total_pages} 页\n\n"
+        f"请选择要发送消息的用户："
     )
 
-    await reply_custom(
-        update.message,
-        text,
-        USER_MARK,
-        USER_EMOJI_ID
+    await query.edit_message_text(
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 # =========================
-# 管理员开通VIP
+# 打开用户列表
 # =========================
 
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("你没有权限使用此命令。")
+async def open_admin_user_list(update: Update):
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("你没有权限使用此功能。")
         return
 
-    if len(context.args) < 2:
-        await update.message.reply_text("用法：/approve 用户ID 天数")
-        return
+    admin_message_targets.pop(user_id, None)
 
-    try:
-        target_id = int(context.args[0])
-        days = int(context.args[1])
+    rows, total, total_pages, page = get_users_page(0)
 
-        if days <= 0:
-            raise ValueError
+    keyboard = []
 
-    except ValueError:
-        await update.message.reply_text("用户ID和天数必须是有效数字。")
-        return
+    for target_id, username, first_name in rows:
+        name = first_name or "未设置姓名"
+        username_text = f"@{username}" if username else "无用户名"
 
-    row = get_user(target_id)
+        button_text = f"{name} | {username_text} | {target_id}"
 
-    if not row:
-        await update.message.reply_text("没有找到这个用户。")
-        return
+        if len(button_text) > 60:
+            button_text = button_text[:57] + "..."
 
-    now = datetime.now()
+        keyboard.append([
+            InlineKeyboardButton(
+                button_text,
+                callback_data=f"msg_user_{target_id}"
+            )
+        ])
 
-    if row[5]:
-        try:
-            old = datetime.fromisoformat(row[5])
+    if total_pages > 1:
+        keyboard.append([
+            InlineKeyboardButton(
+                "下一页 ➡️",
+                callback_data="msg_page_1"
+            )
+        ])
 
-            if old > now:
-                now = old
-
-        except ValueError:
-            pass
-
-    expiry = (now + timedelta(days=days)).isoformat(
-        sep=" ",
-        timespec="seconds"
-    )
-
-    con = db()
-    cur = con.cursor()
-
-    cur.execute(
-        "UPDATE users SET vip_until=? WHERE user_id=?",
-        (expiry, target_id)
-    )
-
-    con.commit()
-    con.close()
+    keyboard.append([
+        InlineKeyboardButton(
+            "❌ 退出发消息",
+            callback_data="msg_exit"
+        )
+    ])
 
     await update.message.reply_text(
-        f"✅ 已为用户 {target_id} 开通 {days} 天 VIP。\n"
-        f"到期时间：{expiry}"
+        f"📨 管理员发消息\n\n"
+        f"用户总数：{total}\n"
+        f"请选择要发送消息的用户：",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-    try:
-        await send_custom(
-            context.bot,
-            target_id,
-            f"{VIP_MARK} 管理员已为你开通 {days} 天 VIP！\n到期时间：{expiry}",
-            VIP_MARK,
-            VIP_EMOJI_ID
-        )
-
-    except Exception:
-        logging.exception("通知用户VIP开通失败")
-
 
 # =========================
-# 管理员调整积分
+# 管理员发消息回调
 # =========================
 
-async def change_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("你没有权限使用此命令。")
+async def admin_send_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("你没有权限使用此功能。", show_alert=True)
         return
 
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "用法：/addpoints 或 /delpoints 用户ID 积分"
-        )
-        return
+    data = query.data
 
-    try:
-        target_id = int(context.args[0])
-        amount = int(context.args[1])
+    if data == "msg_exit":
+        admin_message_targets.pop(ADMIN_ID, None)
 
-        if amount <= 0:
-            raise ValueError
+        await query.answer("已退出发消息模式。")
 
-    except ValueError:
-        await update.message.reply_text(
-            "用户ID和积分必须是正整数。"
+        await query.edit_message_text(
+            "❌ 已退出管理员发消息模式。"
         )
         return
 
-    row = get_user(target_id)
+    if data == "msg_back":
+        admin_message_targets.pop(ADMIN_ID, None)
 
-    if not row:
-        await update.message.reply_text("没有找到这个用户。")
+        await query.answer("已返回用户列表。")
+        await show_admin_user_page(query, 0)
         return
 
-    command = update.message.text.split()[0].split("@")[0]
-
-    con = db()
-    cur = con.cursor()
-
-    if command == "/addpoints":
-        cur.execute(
-            "UPDATE users SET points=points+? WHERE user_id=?",
-            (amount, target_id)
-        )
-
-        message_text = f"已为用户 {target_id} 增加 {amount} 积分。"
-
-    else:
-        cur.execute(
-            "UPDATE users SET points=MAX(0, points-?) WHERE user_id=?",
-            (amount, target_id)
-        )
-
-        message_text = f"已为用户 {target_id} 扣除 {amount} 积分。"
-
-    con.commit()
-    con.close()
-
-    await update.message.reply_text(message_text)
-
-
-# =========================
-# 双向联系：发送用户消息
-# =========================
-
-async def forward_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
-    user = update.effective_user
-
-    username_text = (
-        f"@{user.username}"
-        if user.username
-        else "未设置"
-    )
-
-    header = (
-        f"用户名：{username_text}\n"
-        f"{USER_MARK} 用户：{user.id}\n"
-        f"用户名字：{user.first_name or '未设置'}\n\n"
-        "消息内容："
-    )
-
-    try:
-        # 普通文字：资料和消息真正合并成一条
-        if message.text:
-            combined_text = header + "\n" + message.text
-
-            sent = await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=combined_text,
-                entities=custom_entities_all(
-                    combined_text,
-                    USER_MARK,
-                    USER_EMOJI_ID
-                )
-            )
-
-        # 带 caption 的媒体：将资料放进 caption
-        elif message.caption:
-            combined_caption = header + "\n" + message.caption
-
-            sent = await context.bot.copy_message(
-                chat_id=ADMIN_ID,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id,
-                caption=combined_caption,
-                caption_entities=(
-                    custom_entities_all(
-                        combined_caption,
-                        USER_MARK,
-                        USER_EMOJI_ID
-                    )
-                )
-            )
-
-        # 没有 caption 的媒体：Telegram 不支持给所有媒体类型添加说明
-        else:
-            await send_custom(
-                context.bot,
-                ADMIN_ID,
-                header,
-                USER_MARK,
-                USER_EMOJI_ID
-            )
-
-            sent = await context.bot.copy_message(
-                chat_id=ADMIN_ID,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id
-            )
-
-        save_reply_message(sent.message_id, user.id)
-
-        await message.reply_text("✅ 已发送给管理员。")
-
-    except Exception:
-        logging.exception("双向联系转发失败")
-
-        await message.reply_text(
-            "发送失败，请稍后重试。"
-        )
-
-
-# =========================
-# 消息处理
-# =========================
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
-    user = update.effective_user
-
-    if not message or not user:
-        return
-
-    register_user(user)
-
-    user_id = user.id
-    text = message.text or ""
-
-    # 管理员回复双向联系消息
-    if user_id == ADMIN_ID and message.reply_to_message:
-        target_id = get_reply_user(
-            message.reply_to_message.message_id
-        )
-
-        if target_id:
-            try:
-                await context.bot.copy_message(
-                    chat_id=target_id,
-                    from_chat_id=message.chat_id,
-                    message_id=message.message_id
-                )
-
-                await message.reply_text("✅ 已回复用户。")
-
-            except Exception as e:
-                logging.exception("管理员回复用户失败")
-                await message.reply_text(f"发送失败：{e}")
-
-            return
-
-    # 用户提交支付凭证
-    if user_id != ADMIN_ID and user_id in payment_waiting:
+    if data.startswith("msg_page_"):
         try:
-            sent = await context.bot.copy_message(
-                chat_id=ADMIN_ID,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id
-            )
+            page = int(data.replace("msg_page_", ""))
+        except ValueError:
+            await query.answer("页码错误。", show_alert=True)
+            return
 
-            plan = context.user_data.get("selected_plan", "未知套餐")
-            method = context.user_data.get("payment_method", "未知方式")
+        admin_message_targets.pop(ADMIN_ID, None)
 
-            notice = (
-                "💳 VIP支付申请\n"
-                f"{user_id_line(user_id)}\n"
-                f"姓名：{user.first_name or '未设置'}\n"
-                f"用户名：@{user.username if user.username else '未设置'}\n"
-                f"套餐：{plan}\n"
-                f"支付方式：{method}\n"
-                f"凭证消息ID：{sent.message_id}\n\n"
-                "核实到账后，请使用：\n"
-                f"/approve {user_id} {PLANS.get(plan, (0, 7))[1]}"
-            )
-
-            await send_custom(
-                context.bot,
-                ADMIN_ID,
-                notice,
-                USER_MARK,
-                USER_EMOJI_ID
-            )
-
-            payment_waiting.discard(user_id)
-
-            await message.reply_text(
-                "✅ 已提交支付凭证，请等待管理员核实到账。"
-            )
-
-        except Exception as e:
-            logging.exception("提交支付凭证失败")
-            await message.reply_text(f"提交失败，请稍后重试：{e}")
-
+        await query.answer()
+        await show_admin_user_page(query, page)
         return
 
-    # 退出双向联系
-    if text == "❌ 退出联系":
-        clear_mode(user_id)
-
-        await message.reply_text(
-            "已退出双向联系。",
-            reply_markup=main_keyboard(user_id)
-        )
-
-        return
-
-    # 退出菜单
-    if text == "❌ 退出菜单":
-        clear_mode(user_id)
-        context.user_data.clear()
-
-        await message.reply_text(
-            "已退出当前功能。",
-            reply_markup=main_keyboard(user_id)
-        )
-
-        return
-
-    menu_items = {
-        "💬 双向联系",
-        "👤 我的资料",
-        "🆔 查询用户ID",
-        "VIP会员",
-        "💎 VIP会员",
-        "✈️ VIP功能",
-        "✈️ VIP功能 ✅",
-        "🖼 NFT查询",
-        "📱 +888号码查询",
-        "👤 收藏用户名查询",
-        "🎁 每日签到",
-        "👨‍💻 联系管理员",
-    }
-
-    if text in menu_items:
-        clear_mode(user_id)
-        context.user_data.clear()
-
-        if text == "💬 双向联系":
-            user_modes[user_id] = "💬 双向联系"
-            contact_waiting.add(user_id)
-
-            await reply_custom(
-                message,
-                f"{CONTACT_MARK} 双向联系已开启。\n"
-                "你发送的消息会转发给管理员，管理员回复后会转发给你。\n"
-                "点击“❌ 退出联系”即可结束。",
-                CONTACT_MARK,
-                CONTACT_EMOJI_ID,
-                reply_markup=main_keyboard(user_id)
-            )
-
+    if data.startswith("msg_user_"):
+        try:
+            target_id = int(data.replace("msg_user_", ""))
+        except ValueError:
+            await query.answer("用户ID错误。", show_alert=True)
             return
 
-        if text == "👤 我的资料":
-            await profile(update, context)
+        row = get_user(target_id)
+
+        if not row:
+            await query.answer("该用户不存在。", show_alert=True)
+            await show_admin_user_page(query, 0)
             return
 
-        if text == "🆔 查询用户ID":
-            user_modes[user_id] = text
+        admin_message_targets[ADMIN_ID] = target_id
 
-            await message.reply_text(
-                "请转发你想查询的 Telegram 用户消息给我。\n"
-                "如果对方隐藏了转发来源，可能无法查询。"
-            )
+        await query.answer("已选择用户。")
 
-            return
-
-        if text in ("VIP会员", "💎 VIP会员"):
-            await vip(update, context)
-            return
-
-        if text in ("✈️ VIP功能", "✈️ VIP功能 ✅"):
-            await vip_feature(update, context)
-            return
-
-        if text == "🖼 NFT查询":
-            await message.reply_text(
-                "🖼 NFT查询功能暂未开放真实数据查询。"
-            )
-            return
-
-        if text == "📱 +888号码查询":
-            await message.reply_text(
-                "📱 +888号码查询功能暂未开放真实数据查询。"
-            )
-            return
-
-        if text == "👤 收藏用户名查询":
-            await message.reply_text(
-                "👤 收藏用户名查询功能暂未开放真实数据查询。"
-            )
-            return
-
-        if text == "🎁 每日签到":
-            await checkin(update, context)
-            return
-
-        if text == "👨‍💻 联系管理员":
-            keyboard = InlineKeyboardMarkup([
+        await query.edit_message_text(
+            f"✅ 已选择发送对象\n\n"
+            f"用户姓名：{row[2] or '未设置'}\n"
+            f"用户ID：{target_id}\n"
+            f"用户名：@{row[1] or '无'}\n\n"
+            f"现在可以直接发送文字、图片、视频或文件。\n"
+            f"发送的内容会转发给该用户。\n\n"
+            f"发送成功或失败后，仍然保持当前用户。\n\n"
+            f"请选择操作：",
+            reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "联系管理员",
-                        url="https://t.me/kpilx"
+                        "⬅️ 返回选择用户",
+                        callback_data="msg_back"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ 退出发消息",
+                        callback_data="msg_exit"
                     )
                 ]
             ])
+        )
+        return
 
-            await reply_custom(
-                message,
-                f"{ADMIN_MARK} 如需帮助，请点击下方按钮联系管理员。",
-                ADMIN_MARK,
-                ADMIN_EMOJI_ID,
-                reply_markup=keyboard
+
+# =========================
+# 管理员主动发送消息
+# =========================
+
+async def send_admin_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    admin_id = update.effective_user.id
+    target_id = admin_message_targets.get(admin_id)
+
+    if not target_id:
+        return False
+
+    try:
+        await context.bot.copy_message(
+            chat_id=target_id,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id
+        )
+
+        await update.message.reply_text(
+            f"✅ 消息已发送给用户 {target_id}。"
+        )
+
+    except Exception:
+        logger.exception("管理员发送消息失败")
+
+        await update.message.reply_text(
+            f"❌ 发送失败，用户ID：{target_id}\n"
+            f"请检查用户是否屏蔽机器人。"
+        )
+
+    return True
+
+
+# =========================
+# 管理员消息处理
+# =========================
+
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if not update.message:
+        return
+
+    user_id = update.effective_user.id
+
+    # 管理员主动发消息模式优先处理
+    if user_id == ADMIN_ID and user_id in admin_message_targets:
+        await send_admin_message(update, context)
+        return
+
+    # 普通用户注册
+    if user_id != ADMIN_ID:
+        register_user(update.effective_user)
+
+    # 用户点击发消息入口
+    if update.message.text == "📨 给用户发消息":
+        await open_admin_user_list(update)
+        return
+
+    # 用户个人中心
+    if update.message.text == "👤 个人中心":
+        await profile(update, context)
+        return
+
+    # 积分查询
+    if update.message.text == "⭐ 积分查询":
+        await points(update, context)
+        return
+
+    # 每日签到
+    if update.message.text == "📅 每日签到":
+        await checkin(update, context)
+        return
+
+    # VIP套餐
+    if update.message.text == "💎 VIP套餐":
+        await vip_plans(update, context)
+        return
+
+    # 积分兑换
+    if update.message.text == "🎁 积分兑换VIP":
+        await exchange_vip(update, context)
+        return
+
+    # 联系管理员
+    if update.message.text == "📞 联系管理员":
+        await update.message.reply_text(
+            "如需帮助，请联系管理员：\nhttps://t.me/kpilx"
+        )
+        return
+
+    # 管理员面板
+    if update.message.text == "⚙️ 管理员面板":
+        if user_id == ADMIN_ID:
+            await update.message.reply_text(
+                "⚙️ 管理员面板\n\n"
+                "/stats - 机器人统计\n"
+                "/reducevip 用户ID 天数 - 减少VIP\n"
+                "/clearvip 用户ID - 清空VIP\n"
+                "/myid - 查看自己的ID"
             )
+        return
+
+    # 管理员回复用户的原有功能
+    if user_id == ADMIN_ID and update.message.reply_to_message:
+        con = db()
+        cur = con.cursor()
+
+        cur.execute(
+            "SELECT user_id FROM replies WHERE admin_message_id=?",
+            (update.message.reply_to_message.message_id,)
+        )
+
+        row = cur.fetchone()
+        con.close()
+
+        if row:
+            target_id = row[0]
+
+            try:
+                await context.bot.copy_message(
+                    chat_id=target_id,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id
+                )
+
+                await update.message.reply_text("✅ 已回复用户。")
+
+            except Exception:
+                await update.message.reply_text("❌ 回复失败。")
 
             return
 
-    # 查询转发消息中的用户ID
-    if user_modes.get(user_id) == "🆔 查询用户ID":
-        origin = message.forward_origin
-
-        if origin and getattr(origin, "type", None) == "user":
-            target = origin.sender_user
-
-            result_text = (
-                "✅ 查询成功\n"
-                f"姓名：{target.first_name or '未设置'}\n"
-                f"用户名：@{target.username if target.username else '未设置'}\n"
-                f"{user_id_line(target.id)}"
-            )
-
-            await reply_custom(
-                message,
-                result_text,
-                USER_MARK,
-                USER_EMOJI_ID
-            )
-
-        else:
-            await message.reply_text(
-                "无法读取这条消息的发送者信息。\n"
-                "请尝试转发一条没有隐藏来源的消息。"
-            )
-
-        clear_mode(user_id)
-        return
-
-    # 双向联系
-    if user_id != ADMIN_ID and user_id in contact_waiting:
-        await forward_contact_message(update, context)
-        return
-
-    # 其他消息
+    # 用户向管理员发送消息
     if user_id != ADMIN_ID:
-        await message.reply_text(
-            "请选择底部菜单中的功能，或发送 /help 查看帮助。",
-            reply_markup=main_keyboard(user_id)
-        )
+        try:
+            sent = await context.bot.copy_message(
+                chat_id=ADMIN_ID,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
 
+            con = db()
+            cur = con.cursor()
 
-# =========================
-# 帮助
+            cur.execute(
+                "INSERT OR REPLACE INTO replies "
+                "(admin_message_id, user_id) VALUES (?, ?)",
+                (sent.message_id, user_id)
+            )
+
+            con.commit()
+            con.close()
+
+            await update.message.reply_text("✅ 消息已发送给管理员。")
+
+        except Exception:
+            logger.exception("用户联系管理员失败")
+            await update.message.reply_text("❌ 发送失败，请稍后重试。")
+            
+            # =========================
+# 帮助命令
 # =========================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "机器人使用说明：\n\n"
-        "/start - 打开机器人\n"
-        "/qd - 每日签到\n"
-        "/jf - 查询积分\n"
-        "/dh - 积分兑换VIP\n"
-        "/me - 我的资料\n"
-        "/myid - 查询自己的用户ID\n"
-        "/help - 使用帮助"
+    if update.effective_user.id == ADMIN_ID:
+        text = (
+            "📚 管理员命令\n\n"
+            "/start - 启动机器人\n"
+            "/myid - 查看自己的ID\n"
+            "/stats - 统计数据\n"
+            "/reducevip 用户ID 天数 - 减少VIP天数\n"
+            "/clearvip 用户ID - 清空VIP\n"
+        )
+    else:
+        text = (
+            "📚 用户帮助\n\n"
+            "/start - 启动机器人\n"
+            "/myid - 查看自己的ID\n"
+            "/help - 查看帮助\n"
+        )
+
+    await update.message.reply_text(text)
+
+
+# =========================
+# 管理员用户列表命令
+# =========================
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("你没有权限使用此命令。")
+        return
+
+    await open_admin_user_list(update)
+
+
+# =========================
+# VIP套餐回调
+# =========================
+
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    plans = {
+        "plan_7": ("7天", "1 USDT"),
+        "plan_30": ("30天", "2 USDT"),
+        "plan_90": ("90天", "5 USDT"),
+        "plan_365": ("365天", "10 USDT"),
+    }
+
+    if data not in plans:
+        return
+
+    name, price = plans[data]
+
+    await query.edit_message_text(
+        f"你选择了：{name} VIP\n"
+        f"价格：{price}\n\n"
+        "请联系管理员完成付款和开通。"
     )
 
 
 # =========================
-# 命令设置
+# BotCommand菜单
 # =========================
 
 async def post_init(application: Application):
     user_commands = [
-        BotCommand("start", "打开机器人"),
-        BotCommand("qd", "每日签到"),
-        BotCommand("jf", "查询积分"),
-        BotCommand("dh", "积分兑换VIP"),
-        BotCommand("me", "我的资料"),
-        BotCommand("myid", "查询用户ID"),
-        BotCommand("help", "使用帮助"),
+        BotCommand("start", "启动机器人"),
+        BotCommand("myid", "查看用户ID"),
+        BotCommand("help", "帮助"),
     ]
 
     admin_commands = user_commands + [
-        BotCommand("admin", "管理员菜单"),
-        BotCommand("stats", "查看统计"),
-        BotCommand("users", "查看所有用户"),
-        BotCommand("user", "查看用户资料"),
-        BotCommand("approve", "开通VIP"),
-        BotCommand("addpoints", "增加积分"),
-        BotCommand("delpoints", "扣除积分"),
+        BotCommand("stats", "机器人统计"),
+        BotCommand("users", "用户列表"),
+        BotCommand("reducevip", "减少VIP天数"),
+        BotCommand("clearvip", "清空VIP"),
     ]
 
     await application.bot.set_my_commands(user_commands)
 
     await application.bot.set_my_commands(
         admin_commands,
-        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+        scope=None
     )
 
 
 # =========================
-# 启动
+# main
 # =========================
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError(
-            "请先在 FadeHost 设置 BOT_TOKEN 环境变量。"
+            "没有找到 BOT_TOKEN 环境变量，请先设置机器人Token。"
         )
 
     init_db()
@@ -1375,33 +1113,34 @@ def main():
         .build()
     )
 
+    # 用户命令
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("qd", checkin))
-    application.add_handler(CommandHandler("jf", points))
-    application.add_handler(CommandHandler("dh", redeem))
-    application.add_handler(CommandHandler("me", profile))
-    application.add_handler(CommandHandler("myid", myid))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("myid", myid))
 
-    application.add_handler(CommandHandler("admin", admin_command))
+    # 管理员命令
     application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("users", users_list))
-    application.add_handler(CommandHandler("user", user_info))
-    application.add_handler(CommandHandler("approve", approve))
-    application.add_handler(CommandHandler("addpoints", change_points))
-    application.add_handler(CommandHandler("delpoints", change_points))
+    application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(CommandHandler("reducevip", reduce_vip))
+    application.add_handler(CommandHandler("clearvip", clear_vip))
 
-    application.add_handler(CallbackQueryHandler(payment_callback))
-
-    # VIP按钮单独处理，必须放在通用消息处理器前面
+    # 管理员发消息回调
     application.add_handler(
-        MessageHandler(
-            filters.Regex(r"^✈️ VIP功能(?: ✅)?$"),
-            vip_feature
+        CallbackQueryHandler(
+            admin_send_callback,
+            pattern=r"^msg_"
         )
     )
 
-    # 其他消息统一处理
+    # VIP套餐回调
+    application.add_handler(
+        CallbackQueryHandler(
+            payment_callback,
+            pattern=r"^plan_"
+        )
+    )
+
+    # 普通消息和媒体消息
     application.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
@@ -1410,6 +1149,7 @@ def main():
     )
 
     print("机器人启动成功！")
+
     application.run_polling()
 
 
