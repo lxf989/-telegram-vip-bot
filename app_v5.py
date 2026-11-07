@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import logging
+import asyncio
 from datetime import date, datetime, timedelta
 
 from telegram import (
@@ -1557,7 +1558,14 @@ async def forward_contact_message(
 
         save_reply_message(sent.message_id, user.id)
 
-        await message.reply_text("✅ 已发送给管理员。")
+        notice = await message.reply_text("✅ 已发送给管理员。")
+
+        await asyncio.sleep(1)
+
+        try:
+            await notice.delete()
+        except Exception:
+            logger.exception("自动删除发送成功提示失败")
 
     except Exception:
         logger.exception("双向联系转发失败")
@@ -1565,7 +1573,6 @@ async def forward_contact_message(
         await message.reply_text(
             "发送失败，请稍后重试。"
         )
-
 
 # ==================================================
 # 消息处理
